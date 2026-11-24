@@ -1,13 +1,17 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET"/>
     <uses-permission android:name="android.permission.RECORD_AUDIO"/>
-    <application android:label="e-reading v0.1.0" android:theme="@android:style/Theme.Material.Light.NoActionBar" android:allowBackup="false" android:usesCleartextTraffic="false">
+    <!-- Lets reading aloud find the device's text-to-speech engines (Android 11 and later). -->
+    <queries>
+        <intent><action android:name="android.intent.action.TTS_SERVICE"/></intent>
+    </queries>
+    <application android:label="e-reading v0.2.0" android:theme="@android:style/Theme.Material.Light.NoActionBar" android:allowBackup="false" android:usesCleartextTraffic="false">
         <activity android:name=".ReaderActivity" android:exported="true" android:launchMode="singleTop" android:configChanges="orientation|screenSize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN"/>
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
-            <intent-filter android:label="e-reading v0.1.0">
+            <intent-filter android:label="e-reading v0.2.0">
                 <action android:name="android.intent.action.VIEW"/>
                 <category android:name="android.intent.category.DEFAULT"/>
                 <data android:scheme="content"/>
