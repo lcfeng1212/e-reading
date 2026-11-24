@@ -108,6 +108,15 @@ public final class ReaderSmokeTest {
                 assertTrue(pages.text(0).contains("Offline reader"));
                 assertTrue(copied.get());
             }
+            // A provider may hand over a descriptor that cannot seek. Opening in place must fail
+            // cleanly so the reader falls back to a copy.
+            var pipe = android.os.ParcelFileDescriptor.createPipe();
+            try {
+                new Pages(pipe[0], () -> pdf).close();
+                fail("A pipe cannot be read as a PDF in place");
+            } catch (IOException | RuntimeException expected) {
+                // Expected: PdfRenderer rejects a descriptor it cannot seek.
+            } finally { pipe[1].close(); }
             try (var zip = new ZipOutputStream(new FileOutputStream(cbz))) {
                 putImage(zip, "10.png", Color.BLACK);
                 putImage(zip, "2.png", Color.WHITE);

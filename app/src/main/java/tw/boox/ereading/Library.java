@@ -102,14 +102,21 @@ final class Library {
      * since import. Returns null when a verified copy is needed instead.
      */
     ParcelFileDescriptor unchangedPdf(JSONObject book) {
-        if (book.optBoolean("local") || !book.optString("format").equals("pdf")) return null;
-        long size = book.optLong("bytes", -1), modified = book.optLong("modified", -1);
-        if (size < 0 || modified < 0) return null;
-        Uri uri = Uri.parse(book.optString("uri"));
-        long[] now = stamp(uri);
-        if (now[0] != size || now[1] != modified) return null;
-        try { return context.getContentResolver().openFileDescriptor(uri, "r"); }
+        if (book.optBoolean("local") || !book.optString("format").equals("pdf") || !unchanged(book)) return null;
+        try { return context.getContentResolver().openFileDescriptor(Uri.parse(book.optString("uri")), "r"); }
         catch (Exception e) { return null; }
+    }
+
+    /**
+     * Whether a book kept at its original location still has the size and modification time
+     * recorded at import. Unknown values count as changed, so the content is verified again.
+     */
+    private boolean unchanged(JSONObject book) {
+        if (book.optBoolean("local")) return true;
+        long size = book.optLong("bytes", -1), modified = book.optLong("modified", -1);
+        if (size < 0 || modified < 0) return false;
+        long[] now = stamp(Uri.parse(book.optString("uri")));
+        return now[0] == size && now[1] == modified;
     }
 
     synchronized JSONObject replace(JSONObject old, Uri uri, boolean continueReading) throws Exception {
@@ -145,12 +152,19 @@ final class Library {
 
     File source(JSONObject book) throws IOException {
         File target = new File(folder, book.optString("id"));
-        if (target.isFile()) return target;
-        if (book.optBoolean("local")) throw new IOException("本機副本不存在，請重新匯入");
+        if (book.optBoolean("local")) {
+            if (target.isFile()) return target;
+            throw new IOException("本機副本不存在，請重新匯入");
+        }
+        // A kept copy is reused only while the original is untouched. Otherwise it is copied
+        // and hashed again, which reports an edited original instead of showing the old text.
+        if (target.isFile() && unchanged(book)) return target;
+        target.delete();
+        Uri uri = Uri.parse(book.optString("uri"));
         File temp = File.createTempFile("reader-", ".tmp", folder);
         try {
             var digest = MessageDigest.getInstance("SHA-256");
-            try (var in = context.getContentResolver().openInputStream(Uri.parse(book.optString("uri")));
+            try (var in = context.getContentResolver().openInputStream(uri);
                  var out = new FileOutputStream(temp)) {
                 if (in == null) throw new IOException("找不到原檔，請重新選檔");
                 byte[] buffer = new byte[64 * 1024];
@@ -161,7 +175,15 @@ final class Library {
             if (!book.optString("id").startsWith(hex(digest.digest()) + "."))
                 throw new IOException("原檔內容已變更，請重新匯入");
             commit(temp, target);
+            // Same content with a new timestamp, e.g. copied again: remember the new stamp.
+            long[] stamp = stamp(uri);
+            synchronized (this) {
+                try { book.put("bytes", stamp[0]); book.put("modified", stamp[1]); } catch (JSONException ignored) {}
+                save();
+            }
             return target;
+        } catch (IOException e) {
+            throw e;
         } catch (Exception e) {
             throw new IOException(e.getMessage(), e);
         } finally { temp.delete(); }
@@ -174,8 +196,10 @@ final class Library {
         if (type.equals("epub")) return source(book);
         String selected = manualEncoding == null ? book.optString("encoding", "auto") : manualEncoding;
         File result = new File(folder, book.optString("id") + "-v1-" + selected + ".epub");
-        if (result.isFile()) return result;
+        if (result.isFile() && unchanged(book)) return result;
+        // Verifies the original. It throws when the content has changed since import.
         File original = source(book);
+        if (result.isFile()) return result;
         File temp = File.createTempFile("conversion-", ".tmp", folder);
         try {
             if (type.equals("mobi")) Mobi.convert(original, temp);

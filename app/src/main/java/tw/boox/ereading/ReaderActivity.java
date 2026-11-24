@@ -351,7 +351,10 @@ public final class ReaderActivity extends Activity {
                 Books.Epub description = null;
                 if (type.equals("pdf")) {
                     var inPlace = library.unchangedPdf(entry);
-                    p = inPlace != null ? new Pages(inPlace, () -> library.source(entry)) : new Pages(library.source(entry), true);
+                    // Some providers return a descriptor PdfRenderer cannot seek. Fall back to a copy.
+                    if (inPlace != null) try { p = new Pages(inPlace, () -> library.source(entry)); }
+                        catch (Exception unreadable) { p = null; }
+                    if (p == null) p = new Pages(library.source(entry), true);
                 } else if (type.equals("cbz")) p = new Pages(library.source(entry), false);
                 else {
                     java.util.function.IntConsumer progress = type.equals("txt") ? percent ->
