@@ -34,13 +34,9 @@ final class Voice {
             try {
                 if (model == null) {
                     listener.state("正在載入離線語音…");
-                    File directory = new File(context.getFilesDir(), "voice-cn");
-                    File marker = new File(directory, ".ready");
-                    if (!marker.isFile()) {
-                        copy("model-cn", directory);
-                        Files.write(marker.toPath(), "vosk-model-small-cn-0.22".getBytes(java.nio.charset.StandardCharsets.US_ASCII));
-                    }
-                    model = new Model(directory.getAbsolutePath());
+                    // The model is downloaded on first use; ReaderActivity offers it before starting.
+                    if (!VoiceModel.ready(context)) { listener.state("尚未下載語音模型"); return; }
+                    model = new Model(VoiceModel.folder(context).getAbsolutePath());
                 }
                 if (run != generation) return;
                 recognizer = new Recognizer(model, 16000,
@@ -96,17 +92,5 @@ final class Voice {
     private void end() {
         if (speech != null) { speech.stop(); speech.shutdown(); speech = null; }
         if (recognizer != null) { recognizer.close(); recognizer = null; }
-    }
-
-    private void copy(String asset, File to) throws IOException {
-        String[] children = context.getAssets().list(asset);
-        if (children != null && children.length > 0) {
-            if (!to.isDirectory() && !to.mkdirs()) throw new IOException("無法建立模型資料夾");
-            for (String child : children) copy(asset + "/" + child, new File(to, child));
-        } else {
-            try (var in = context.getAssets().open(asset)) {
-                Files.copy(in, to.toPath(), StandardCopyOption.REPLACE_EXISTING);
-            }
-        }
     }
 }

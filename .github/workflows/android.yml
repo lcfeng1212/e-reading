@@ -9,7 +9,8 @@ jobs:
   build:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      # Write is used only by the last step on main, to publish the APK and mirror the voice model.
+      contents: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
@@ -22,13 +23,32 @@ jobs:
       - uses: android-actions/setup-android@v3
         with:
           packages: 'platform-tools platforms;android-35 build-tools;35.0.0 ndk;27.2.12479018 cmake;3.22.1'
-      - name: Prepare offline Chinese voice model
+      - name: Pin the voice model downloaded on first use
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          curl --fail --location --retry 3 https://alphacephei.com/vosk/models/vosk-model-small-cn-0.22.zip -o /tmp/boox-model.zip
-          unzip -q /tmp/boox-model.zip -d /tmp/boox-voice
-          mkdir -p app/src/main/assets
-          mv /tmp/boox-voice/vosk-model-small-cn-0.22 app/src/main/assets/model-cn
-          test -s app/src/main/assets/model-cn/am/final.mdl
+          # The app downloads the model the first time voice is switched on. Fetch it here only to
+          # pin its SHA-256, preferring this project's mirror so the checksum matches what users get.
+          if gh release download voice-model-cn-0.22 -R "$GITHUB_REPOSITORY" -p vosk-model-small-cn-0.22.zip -O /tmp/voice-model.zip; then
+            echo "Using the mirrored model"
+          else
+            curl --fail --location --retry 3 https://alphacephei.com/vosk/models/vosk-model-small-cn-0.22.zip -o /tmp/voice-model.zip
+          fi
+          unzip -l /tmp/voice-model.zip | grep -q 'vosk-model-small-cn-0.22/am/final.mdl'
+          echo "ORG_GRADLE_PROJECT_voskSha=$(sha256sum /tmp/voice-model.zip | cut -d' ' -f1)" >> "$GITHUB_ENV"
+      - name: Use the project signing key
+        env:
+          DEBUG_KEYSTORE: ${{ secrets.DEBUG_KEYSTORE }}
+        run: |
+          # A fixed key lets each new APK install over the previous one, keeping the shelf.
+          # Without the secret, each run signs with a new key and updates need a reinstall.
+          if [ -n "$DEBUG_KEYSTORE" ]; then
+            mkdir -p ~/.android
+            echo "$DEBUG_KEYSTORE" | base64 -d > ~/.android/debug.keystore
+            echo "Signing with the project key"
+          else
+            echo "::warning::DEBUG_KEYSTORE secret not set; this APK cannot update an earlier install"
+          fi
       - name: Prepare Chinese conversion dictionaries
         run: |
           curl --fail --location --retry 3 https://codeload.github.com/BYVoid/OpenCC/tar.gz/refs/tags/ver.1.1.9 -o /tmp/opencc.tar.gz
@@ -91,3 +111,22 @@ jobs:
           target: google_apis
           disable-animations: true
           script: gradle :app:connectedDebugAndroidTest
+      - name: Publish the installable APK and mirror the voice model
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          repo="$GITHUB_REPOSITORY"
+          if ! gh release view voice-model-cn-0.22 -R "$repo" >/dev/null 2>&1; then
+            gh release create voice-model-cn-0.22 /tmp/voice-model.zip -R "$repo" --latest=false \
+              --title "離線中文語音模型 vosk-model-small-cn-0.22" \
+              --notes "e-reading 第一次開啟語音翻頁時下載。來源：https://alphacephei.com/vosk/models（Apache 2.0）。"
+          fi
+          version=$(jq -er '.elements[0].versionName' app/build/outputs/apk/debug/output-metadata.json)
+          tag="v$version"
+          cp "${{ steps.apk.outputs.name }}.apk" e-reading.apk
+          if ! gh release view "$tag" -R "$repo" >/dev/null 2>&1; then
+            gh release create "$tag" -R "$repo" --latest --title "e-reading $tag" \
+              --notes "在 BOOX Go 7 用瀏覽器開啟 https://github.com/$repo/releases/latest/download/e-reading.apk 即可下載安裝。"
+          fi
+          gh release upload "$tag" e-reading.apk "${{ steps.apk.outputs.name }}.apk" -R "$repo" --clobber
