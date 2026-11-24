@@ -58,6 +58,17 @@ public final class ReaderActivity extends Activity {
     private double pendingFraction = -1;
     private final LinkedHashMap<String, String> translations = new LinkedHashMap<>(32, .75f, true);
     private Translator translator;
+    // Automatic page turning or scrolling, and reading aloud. Both stop when the app closes.
+    private boolean autoOn, speaking, pendingSpeech;
+    private Speech speech;
+    private int followParagraph = -1, followOffset;
+    private long followTime;
+    private static final int GLIDE_MS = 250;
+    private static final int[] AUTO_SECONDS = {3, 5, 8, 10, 15, 20, 30, 45, 60, 90, 120};
+    private static final float[] SPEECH_RATES = {0.8f, 1f, 1.2f, 1.5f, 1.8f};
+    private final Runnable autoTick = this::autoTick;
+    // After the reader drags a scrolling page, record where it stopped.
+    private final Runnable scrollSync = () -> { if (web != null && !busy && scrolling()) js("reader.state()", this::apply); };
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
@@ -90,10 +101,15 @@ public final class ReaderActivity extends Activity {
         if (Intent.ACTION_VIEW.equals(intent.getAction()) && intent.getData() != null)
             importFiles(List.of(intent.getData()), intent.getFlags());
     }
-    @Override protected void onResume() { super.onResume(); active = true; syncVoice(); }
-    @Override protected void onPause() { active = false; syncVoice(); snapshot(true); super.onPause(); }
+    @Override protected void onResume() { super.onResume(); active = true; syncVoice(); scheduleAuto(); }
+    @Override protected void onPause() {
+        active = false; syncVoice(); main.removeCallbacks(autoTick);
+        if (speaking) stopSpeech();
+        snapshot(true); super.onPause();
+    }
     @Override protected void onDestroy() {
         closeBook(); voice.close();
+        if (speech != null) speech.close();
         if (translator != null) translator.close();
         io.shutdown();
         super.onDestroy();
@@ -437,12 +453,19 @@ public final class ReaderActivity extends Activity {
         status = label("", 12); status.setGravity(Gravity.CENTER); weighted(footer, status);
         status.setOnClickListener(v -> toggleToolbar());
         mic = label("", 12); mic.setPadding(dp(5), 0, dp(10), 0); footer.addView(mic);
-        mic.setOnClickListener(v -> toggleVoice());
+        // The footer lists what is running; a tap stops the first of them.
+        mic.setOnClickListener(v -> {
+            if (voiceOn) toggleVoice();
+            else if (speaking) stopSpeech();
+            else if (autoOn) setAuto(false);
+        });
         bar = row(); layout.addView(bar);
         weighted(bar, action("目錄／跳頁", this::navigation));
         weighted(bar, action(pages != null || epub.fixed() ? "版面" : "Aa", this::appearance));
         if (epub != null || book.optString("format").equals("pdf")) weighted(bar, action("翻譯", () -> translate(false)));
         weighted(bar, action("語音", this::toggleVoice));
+        weighted(bar, action("自動", this::autoOptions));
+        if (epub != null && !epub.fixed()) weighted(bar, action("朗讀", this::toggleSpeech));
         header.setVisibility(View.GONE); bar.setVisibility(View.GONE);
         if (epub != null) createWeb();
         else createImage();
@@ -455,6 +478,7 @@ public final class ReaderActivity extends Activity {
         bar.setVisibility(toolbar ? View.VISIBLE : View.GONE);
         if (web != null && !busy) web.postDelayed(this::relayout, 80);
         if (image != null) resetImage();
+        scheduleAuto();
     }
 
     private void createWeb() {
@@ -526,6 +550,10 @@ public final class ReaderActivity extends Activity {
         settings.setTextZoom(100);
         settings.setLayoutAlgorithm(WebSettings.LayoutAlgorithm.NORMAL);
         web.setOnTouchListener(this::readerTouch);
+        web.setOnScrollChangeListener((v, x, y, oldX, oldY) -> {
+            if (!scrolling() || y == oldY) return;
+            main.removeCallbacks(scrollSync); main.postDelayed(scrollSync, 400);
+        });
         content.addView(web, new FrameLayout.LayoutParams(-1, -1));
         loadChapter(chapter, page, paragraph, offset, sample);
     }
@@ -594,7 +622,8 @@ public final class ReaderActivity extends Activity {
     private void restoreWeb(int position, int anchor, double ratio, String excerpt) {
         String settings = "{\"font\":" + Math.max(14, Math.min(44, book.optInt("size", 23))) +
             ",\"night\":" + book.optBoolean("night") + ",\"serif\":" + book.optString("font").equals("serif") +
-            ",\"line\":" + Math.max(1.2, Math.min(2.1, book.optDouble("spacing", 1.55))) + "}";
+            ",\"line\":" + Math.max(1.2, Math.min(2.1, book.optDouble("spacing", 1.55))) +
+            ",\"scroll\":" + scrolling() + "}";
         js("reader.layout(" + settings + ")", unused ->
             js("reader.locate(" + position + "," + anchor + "," + ratio + "," + JSONObject.quote(excerpt) + ")", value -> {
                 apply(value);
@@ -634,6 +663,13 @@ public final class ReaderActivity extends Activity {
             snapshot();
         } catch (Exception ignored) {}
         refreshStatus();
+        // A page turned by hand, or a new chapter, while reading aloud: read on from here.
+        if (pendingSpeech && speaking && !busy) { pendingSpeech = false; main.post(this::speakHere); }
+    }
+
+    /** Flowing text laid out as one tall column instead of pages. */
+    private boolean scrolling() {
+        return book != null && epub != null && !epub.fixed() && book.optString("flow").equals("scroll");
     }
 
     private void createImage() {
@@ -713,7 +749,8 @@ public final class ReaderActivity extends Activity {
         float delta = event.getX() - downX;
         if (event.getEventTime() - event.getDownTime() > 420) return view == image;
         boolean rtl = book.optBoolean("rtl", epub != null && epub.rtl());
-        if (Math.abs(delta) > dp(48)) { turn((delta < 0 ? 1 : -1) * (rtl ? -1 : 1)); return true; }
+        boolean sideways = !scrolling() || Math.abs(delta) > Math.abs(event.getY() - downY) * 1.5f;
+        if (Math.abs(delta) > dp(48) && sideways) { turn((delta < 0 ? 1 : -1) * (rtl ? -1 : 1)); return true; }
         if (Math.abs(delta) > dp(18) || Math.abs(event.getY() - downY) > dp(18)) return view == image;
         float x = event.getX() / Math.max(1, view.getWidth());
         Runnable tap = () -> {
@@ -768,12 +805,22 @@ public final class ReaderActivity extends Activity {
         return false;
     }
 
+    /** A page turn asked for by the reader: by touch, key or voice. */
     private void turn(int delta) {
+        if (book == null) return;
+        // The reader chose a new place: count the automatic interval again, and read from there.
+        if (autoOn) scheduleAuto();
+        if (speaking && !busy) { speech.stop(); pendingSpeech = true; }
+        step(delta);
+    }
+
+    private void step(int delta) {
         if (book == null) return;
         if (busy) { queuedTurn = delta; return; }
         if (pages != null) {
             int next = page + delta;
             if (next >= 0 && next < pages.count()) { page = next; renderImage(); }
+            else if (delta > 0) reachedEnd();
             return;
         }
         busy = true;
@@ -781,9 +828,192 @@ public final class ReaderActivity extends Activity {
             if ("null".equals(value)) {
                 int next = chapter + delta;
                 if (next >= 0 && next < epub.chapters().size()) loadChapter(next, delta > 0 ? 0 : -1, -1, 0, "");
-                else settle();
+                else { settle(); if (delta > 0) reachedEnd(); }
             } else apply(value);
         });
+    }
+
+    private void reachedEnd() {
+        if (autoOn) { autoOn = false; main.removeCallbacks(autoTick); message("已到書末，自動翻頁已停止"); }
+        if (speaking) { stopSpeech(); message("已讀到書末"); }
+        refreshStatus();
+    }
+
+    private android.content.SharedPreferences prefs() { return getPreferences(0); }
+    private int autoSeconds() { return prefs().getInt("autoSeconds", 20); }
+    /** Scroll mode can move a screen at a time or creep down continuously. */
+    private boolean gliding() { return scrolling() && prefs().getString("autoStyle", "screen").equals("smooth"); }
+
+    private void scheduleAuto() {
+        main.removeCallbacks(autoTick);
+        if (!autoOn || book == null || !active) return;
+        main.postDelayed(autoTick, gliding() ? GLIDE_MS : autoSeconds() * 1000L);
+    }
+
+    private void autoTick() {
+        if (!autoOn || book == null || !active) return;
+        // Wait while the tool bar is open, a page is loading, or the book is being read aloud.
+        if (toolbar || busy || speaking) { scheduleAuto(); return; }
+        scheduleAuto();
+        if (gliding()) {
+            double fraction = GLIDE_MS / 1000d / autoSeconds();
+            js("reader.glide(" + fraction + ")", value -> { if ("null".equals(value)) step(1); else apply(value); });
+        } else step(1);
+    }
+
+    private void setAuto(boolean on) {
+        autoOn = on && book != null;
+        scheduleAuto(); refreshStatus();
+    }
+
+    private void autoOptions() {
+        if (book == null) return;
+        var pane = column(); pane.setPadding(dp(16), dp(10), dp(16), dp(8));
+        var holder = new AlertDialog[1];
+        Runnable reopen = () -> { if (holder[0] != null) holder[0].dismiss(); main.post(this::autoOptions); };
+        if (epub != null && !epub.fixed()) {
+            pane.addView(label("閱讀方式", 13));
+            var flow = row(); pane.addView(flow);
+            boolean scroll = scrolling();
+            weighted(flow, action((scroll ? "" : "✓ ") + "翻頁", () -> { setFlow("page"); reopen.run(); }));
+            weighted(flow, action((scroll ? "✓ " : "") + "滾動", () -> { setFlow("scroll"); reopen.run(); }));
+        }
+        if (scrolling()) {
+            pane.addView(label("自動滾動方式", 13));
+            var style = row(); pane.addView(style);
+            boolean smooth = gliding();
+            weighted(style, action((smooth ? "" : "✓ ") + "一次一屏", () -> { prefs().edit().putString("autoStyle", "screen").apply(); scheduleAuto(); reopen.run(); }));
+            weighted(style, action((smooth ? "✓ " : "") + "連續滾動", () -> { prefs().edit().putString("autoStyle", "smooth").apply(); scheduleAuto(); reopen.run(); }));
+        }
+        pane.addView(label(gliding() ? "捲完一屏所需秒數" : "每隔幾秒翻一頁（滾動模式為捲一屏）", 13));
+        var time = row(); pane.addView(time);
+        var value = label("", 16); value.setGravity(Gravity.CENTER);
+        Runnable show = () -> value.setText(autoSeconds() + " 秒");
+        java.util.function.IntConsumer change = direction -> {
+            int index = 0;
+            while (index < AUTO_SECONDS.length - 1 && AUTO_SECONDS[index] < autoSeconds()) index++;
+            index = Math.max(0, Math.min(AUTO_SECONDS.length - 1, index + direction));
+            prefs().edit().putInt("autoSeconds", AUTO_SECONDS[index]).apply();
+            show.run(); scheduleAuto(); refreshStatus();
+        };
+        weighted(time, action("－", () -> change.accept(-1)));
+        weighted(time, value);
+        weighted(time, action("＋", () -> change.accept(1)));
+        show.run();
+        pane.addView(action(autoOn ? "停止自動" : "開始自動", () -> {
+            setAuto(!autoOn);
+            if (autoOn) { message(gliding() ? "開始自動滾動" : "每 " + autoSeconds() + " 秒" + (scrolling() ? "捲動一屏" : "翻一頁")); if (toolbar) toggleToolbar(); }
+            if (holder[0] != null) holder[0].dismiss();
+        }));
+        holder[0] = bottom("自動翻頁", pane);
+    }
+
+    private void setFlow(String flow) {
+        if (busy || epub == null || epub.fixed() || book.optString("flow", "page").equals(flow)) return;
+        put(book, "flow", flow); library.save();
+        relayout(); scheduleAuto();
+    }
+
+    private void toggleSpeech() {
+        if (speaking) { stopSpeech(); refreshStatus(); return; }
+        if (web == null || epub == null || epub.fixed()) return;
+        if (speech == null) speech = new Speech(this, new Speech.Listener() {
+            @Override public void at(int paragraph, int offset) { runOnUiThread(() -> follow(paragraph, offset)); }
+            @Override public void finished() { runOnUiThread(ReaderActivity.this::chapterSpoken); }
+            @Override public void failed() { runOnUiThread(() -> { if (speaking) { stopSpeech(); message("朗讀中斷，請再試一次"); } }); }
+        });
+        speech.rate(prefs().getFloat("speechRate", 1f));
+        var wait = progress("正在準備朗讀…");
+        speech.prepare(book.optString("chinese", "original"), problem -> runOnUiThread(() -> {
+            wait.dismiss();
+            if (book == null || isDestroyed()) return;
+            if (problem == null) {
+                speaking = true; pendingSpeech = false; followParagraph = -1;
+                if (toolbar) toggleToolbar();
+                refreshStatus(); speakHere();
+            } else offerSpeechEngine(problem);
+        }));
+    }
+
+    /** The device has no usable engine or Chinese voice. Both are installed from the system. */
+    private void offerSpeechEngine(String problem) {
+        boolean engine = problem.equals(Speech.NO_ENGINE);
+        var dialog = new AlertDialog.Builder(this).setTitle(engine ? "沒有朗讀引擎" : "沒有中文朗讀語音")
+            .setMessage(engine
+                ? "朗讀使用系統的文字轉語音引擎，App 本身不內附語音。請先安裝引擎（例如 Google 文字轉語音），再回來按「朗讀」。"
+                : "朗讀引擎還沒有中文語音。按「下載語音」到系統設定下載中文語音資料，只需下載一次，之後離線也能朗讀。")
+            .setNegativeButton("取消", null);
+        if (engine) dialog.setPositiveButton("前往安裝", (d, w) -> openOutside(
+            new Intent(Intent.ACTION_VIEW, Uri.parse("market://details?id=com.google.android.tts")),
+            new Intent("com.android.settings.TTS_SETTINGS")));
+        else dialog.setPositiveButton("下載語音", (d, w) -> openOutside(
+            new Intent(android.speech.tts.TextToSpeech.Engine.ACTION_INSTALL_TTS_DATA),
+            new Intent("com.android.settings.TTS_SETTINGS")));
+        dialog.show();
+    }
+
+    private void openOutside(Intent first, Intent fallback) {
+        try { startActivity(first); }
+        catch (ActivityNotFoundException e) {
+            try { startActivity(fallback); } catch (ActivityNotFoundException none) { message("找不到可開啟的系統設定"); }
+        }
+    }
+
+    private void speakHere() {
+        if (!speaking || web == null || speech == null) return;
+        if (busy) { pendingSpeech = true; return; }
+        js("reader.speech()", value -> {
+            if (!speaking) return;
+            var parts = new ArrayList<Speech.Part>();
+            try {
+                var list = new JSONArray(value);
+                for (int i = 0; i < list.length(); i++) {
+                    var item = list.getJSONArray(i);
+                    parts.add(new Speech.Part(item.getInt(0), item.getInt(1), item.getString(2)));
+                }
+            } catch (JSONException e) { stopSpeech(); message("無法讀取這一頁的文字"); return; }
+            followParagraph = -1;
+            if (parts.isEmpty()) chapterSpoken(); else speech.speak(parts);
+        });
+    }
+
+    /** Keeps the sentence being read on screen, without asking the page on every word. */
+    private void follow(int paragraph, int offset) {
+        if (!speaking || web == null || busy) return;
+        long now = android.os.SystemClock.elapsedRealtime();
+        if (paragraph == followParagraph && offset - followOffset < 24 && now - followTime < 2000) return;
+        followParagraph = paragraph; followOffset = offset; followTime = now;
+        js("reader.show(" + paragraph + "," + offset + ")", value -> { if (!"null".equals(value)) apply(value); });
+    }
+
+    private void chapterSpoken() {
+        if (!speaking || epub == null) return;
+        int next = chapter + 1;
+        if (next >= epub.chapters().size()) { reachedEnd(); return; }
+        pendingSpeech = true;
+        loadChapter(next, 0, -1, 0, "");
+    }
+
+    private void stopSpeech() {
+        speaking = false; pendingSpeech = false;
+        if (speech != null) speech.stop();
+        refreshStatus();
+    }
+
+    private void speechRate() {
+        float current = prefs().getFloat("speechRate", 1f);
+        var names = new String[SPEECH_RATES.length];
+        int chosen = 1;
+        for (int i = 0; i < names.length; i++) {
+            names[i] = SPEECH_RATES[i] + " 倍";
+            if (Math.abs(SPEECH_RATES[i] - current) < .01) chosen = i;
+        }
+        new AlertDialog.Builder(this).setTitle("朗讀語速").setSingleChoiceItems(names, chosen, (d, i) -> {
+            prefs().edit().putFloat("speechRate", SPEECH_RATES[i]).apply();
+            if (speech != null) speech.rate(SPEECH_RATES[i]);
+            if (speaking) { speech.stop(); speakHere(); }
+            d.dismiss();
+        }).show();
     }
 
     private void snapshot() { snapshot(false); }
@@ -815,7 +1045,11 @@ public final class ReaderActivity extends Activity {
     private void refreshStatus() {
         if (book == null || status == null) return;
         status.setText(book.optString("progress", " "));
-        mic.setText(voiceOn ? (voiceState.isBlank() ? "語音開啟" : voiceState) : "");
+        var states = new ArrayList<String>();
+        if (speaking) states.add("朗讀中");
+        if (autoOn) states.add(gliding() ? "自動滾動" : "自動 " + autoSeconds() + " 秒");
+        if (voiceOn) states.add(voiceState.isBlank() ? "語音開啟" : voiceState);
+        mic.setText(String.join("・", states));
     }
 
     private void navigation() {
@@ -1041,9 +1275,12 @@ public final class ReaderActivity extends Activity {
             if (modes[i].equals(book.optString("chinese", "original"))) buttons[i].setText("✓ " + names[i]);
             weighted(language, buttons[i]);
         }
+        pane.addView(action(scrolling() ? "閱讀方式：滾動（點此改為翻頁）" : "閱讀方式：翻頁（點此改為滾動）",
+            () -> setFlow(scrolling() ? "page" : "scroll")));
         pane.addView(action("字型與間距", this::typeOptions));
         pane.addView(action("黑白主題", () -> { put(book, "night", !book.optBoolean("night")); library.save(); relayout(); }));
         pane.addView(action("翻頁設定", this::hand));
+        pane.addView(action("朗讀語速", this::speechRate));
         bottom("閱讀設定", pane);
     }
 
@@ -1070,11 +1307,12 @@ public final class ReaderActivity extends Activity {
         value.setText("字級 " + size); relayout();
     }
 
-    private void bottom(String title, View pane) {
+    private AlertDialog bottom(String title, View pane) {
         var dialog = new AlertDialog.Builder(this).setTitle(title).setView(pane).setPositiveButton("關閉", null).create();
         dialog.show();
         var window = dialog.getWindow();
         if (window != null) { window.setGravity(Gravity.BOTTOM); window.setLayout(-1, -2); }
+        return dialog;
     }
 
     private void toggleVoice() {
@@ -1253,6 +1491,8 @@ public final class ReaderActivity extends Activity {
     private void closeBook() {
         snapshot(true); epoch++;
         JSONObject closing = book;
+        if (speaking) stopSpeech();
+        autoOn = false;
         book = null; syncVoice();
         main.removeCallbacksAndMessages(null);
         if (web != null) { web.stopLoading(); web.destroy(); web = null; }

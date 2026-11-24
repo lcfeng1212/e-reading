@@ -247,6 +247,78 @@ public final class ReaderSmokeTest {
         }
     }
 
+    /** Switches an open book to scroll mode: a key press moves one screen down, not sideways. */
+    @Test public void scrollModeMovesDownOneScreen() throws Exception {
+        var instrumentation = InstrumentationRegistry.getInstrumentation();
+        var app = instrumentation.getTargetContext();
+        var resolver = app.getContentResolver();
+        var values = new android.content.ContentValues();
+        values.put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME,
+            "boox-reader-scroll-" + java.util.UUID.randomUUID() + ".txt");
+        values.put(android.provider.MediaStore.MediaColumns.MIME_TYPE, "text/plain");
+        var uri = resolver.insert(android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI, values);
+        assertNotNull(uri);
+        ReaderActivity activity = null;
+        try {
+            try (var output = resolver.openOutputStream(uri)) {
+                assertNotNull(output);
+                output.write(("第1章 滾動\n" + "滾動模式由上往下閱讀。".repeat(400) + "\n").getBytes(StandardCharsets.UTF_8));
+            }
+            var launch = new Intent(Intent.ACTION_VIEW, uri).setClass(app, ReaderActivity.class)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            activity = (ReaderActivity) instrumentation.startActivitySync(launch);
+            ReaderActivity reader = activity;
+            var web = awaitWeb(instrumentation, reader);
+            var flow = ReaderActivity.class.getDeclaredMethod("setFlow", String.class);
+            flow.setAccessible(true);
+            org.json.JSONObject state = null;
+            for (int i = 0; i < 50; i++) {
+                // The switch waits while a page is still being laid out, so ask again until it takes.
+                instrumentation.runOnMainSync(() -> { try { flow.invoke(reader, "scroll"); } catch (Exception e) { throw new RuntimeException(e); } });
+                Thread.sleep(150);
+                state = new org.json.JSONObject(readState(instrumentation, web));
+                if (state.optBoolean("scroll")) break;
+                Thread.sleep(100);
+            }
+            assertTrue("The page should switch to scroll mode", state.optBoolean("scroll"));
+            assertTrue("The test chapter needs more than one screen", state.getInt("total") > 1);
+            assertEquals(0, state.getInt("page"));
+            instrumentation.runOnMainSync(() -> reader.dispatchKeyEvent(new android.view.KeyEvent(
+                android.view.KeyEvent.ACTION_DOWN, android.view.KeyEvent.KEYCODE_PAGE_DOWN)));
+            int current = 0;
+            for (int i = 0; i < 20 && current == 0; i++) {
+                current = new org.json.JSONObject(readState(instrumentation, web)).getInt("page");
+                if (current == 0) Thread.sleep(100);
+            }
+            assertEquals("One key press should scroll one screen", 1, current);
+            assertTrue("Scroll mode moves down", Double.parseDouble(evaluate(instrumentation, web, "window.scrollY")) > 0);
+            assertEquals("Scroll mode does not move sideways", 0, Double.parseDouble(evaluate(instrumentation, web, "window.scrollX")), 0.5);
+            instrumentation.runOnMainSync(() -> { try { flow.invoke(reader, "page"); } catch (Exception e) { throw new RuntimeException(e); } });
+        } finally {
+            if (activity != null) instrumentation.runOnMainSync(activity::finish);
+            resolver.delete(uri, null, null);
+        }
+    }
+
+    private android.webkit.WebView awaitWeb(android.app.Instrumentation instrumentation, ReaderActivity reader) throws Exception {
+        long deadline = android.os.SystemClock.elapsedRealtime() + 25_000;
+        while (android.os.SystemClock.elapsedRealtime() < deadline) {
+            var candidate = new java.util.concurrent.atomic.AtomicReference<android.webkit.WebView>();
+            instrumentation.runOnMainSync(() -> candidate.set(findWeb(reader.findViewById(android.R.id.content))));
+            var web = candidate.get();
+            if (web != null && !readState(instrumentation, web).equals("null")) return web;
+            Thread.sleep(200);
+        }
+        fail("Opening TXT should display a reader");
+        return null;
+    }
+
+    private String evaluate(android.app.Instrumentation target, android.webkit.WebView web, String code) throws Exception {
+        var result = new java.util.concurrent.CompletableFuture<String>();
+        target.runOnMainSync(() -> web.evaluateJavascript(code, result::complete));
+        return result.get(5, java.util.concurrent.TimeUnit.SECONDS);
+    }
+
     private android.webkit.WebView findWeb(android.view.View view) {
         if (view instanceof android.webkit.WebView web) return web;
         if (view instanceof android.view.ViewGroup parent) {
