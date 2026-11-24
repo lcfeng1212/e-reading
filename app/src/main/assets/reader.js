@@ -212,7 +212,9 @@
     },
     goFraction: fraction => go(Math.floor(Math.max(0, Math.min(0.999, fraction)) * total())),
     chapterLink: fragment => {
-      const target = document.getElementById(fragment);
+      // Older EPUBs mark footnotes with <a name="..."> instead of an id.
+      const target = document.getElementById(fragment)
+        || Array.from(document.getElementsByName(fragment)).find(item => item.tagName.toLowerCase() === 'a');
       if (!target || fixed) return state();
       const rect = target.getBoundingClientRect();
       return go(Math.floor((position * width() + (rtl ? width() - rect.right : rect.left)) / width()));
