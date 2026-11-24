@@ -60,9 +60,27 @@ final class Books {
     }
 
     static void txt(File raw, File dest, String title, Charset encoding) throws IOException {
+        txt(raw, dest, title, encoding, null);
+    }
+
+    /** Converts a TXT file, reporting progress from 0 to 100 as the file is read. */
+    static void txt(File raw, File dest, String title, Charset encoding,
+                    java.util.function.IntConsumer progress) throws IOException {
         var decoder = encoding.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
             .onUnmappableCharacter(CodingErrorAction.REPORT);
-        try (var text = new BufferedReader(new InputStreamReader(new FileInputStream(raw), decoder));
+        long length = Math.max(1, raw.length());
+        var source = new FilterInputStream(new FileInputStream(raw)) {
+            long read; int reported = -1;
+            private void count(long n) {
+                if (n <= 0 || progress == null) return;
+                read += n;
+                int percent = (int) Math.min(99, read * 100 / length);
+                if (percent != reported) { reported = percent; progress.accept(percent); }
+            }
+            @Override public int read() throws IOException { int b = super.read(); if (b >= 0) count(1); return b; }
+            @Override public int read(byte[] b, int off, int len) throws IOException { int n = super.read(b, off, len); count(n); return n; }
+        };
+        try (var text = new BufferedReader(new InputStreamReader(source, decoder), 64 * 1024);
              var epub = new EpubOutput(dest, title)) {
             var html = new StringBuilder();
             String heading = "正文";

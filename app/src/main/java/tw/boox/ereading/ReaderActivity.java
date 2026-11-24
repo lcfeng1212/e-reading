@@ -43,6 +43,8 @@ public final class ReaderActivity extends Activity {
     private int chapter, page, paragraph = -1, epoch;
     // The latest turn requested while a page is loading. Only one is kept, so presses do not pile up.
     private int queuedTurn;
+    private long lastSave;
+    private boolean saveScheduled;
     private double offset;
     private String sample = "";
     private boolean busy, toolbar, active, voiceOn, voiceRunning, operation, pendingRotate;
@@ -81,7 +83,7 @@ public final class ReaderActivity extends Activity {
             importFiles(List.of(intent.getData()), intent.getFlags());
     }
     @Override protected void onResume() { super.onResume(); active = true; syncVoice(); }
-    @Override protected void onPause() { active = false; syncVoice(); snapshot(); super.onPause(); }
+    @Override protected void onPause() { active = false; syncVoice(); snapshot(true); super.onPause(); }
     @Override protected void onDestroy() {
         closeBook(); voice.close();
         if (translator != null) translator.close();
@@ -132,8 +134,9 @@ public final class ReaderActivity extends Activity {
     private void base() { layout = column(); layout.setBackgroundColor(Color.WHITE); setContentView(layout); }
     private void message(String text) { Toast.makeText(this, text, Toast.LENGTH_LONG).show(); }
     private void error(Exception e) { message(e.getMessage() == null ? "操作失敗" : e.getMessage()); }
+    // Book records are serialized by Library on the I/O thread too. Edit them under its lock.
     private void put(JSONObject target, String key, Object value) {
-        try { target.put(key, value); } catch (JSONException ignored) {}
+        synchronized (library) { try { target.put(key, value); } catch (JSONException ignored) {} }
     }
 
     private void shelf(String query) {
@@ -341,13 +344,20 @@ public final class ReaderActivity extends Activity {
         closeBook();
         operation = true;
         String type = entry.optString("format");
-        var wait = progress(type.equals("txt") ? "正在準備 EPUB…" : "正在開書…");
+        var wait = progress(type.equals("txt") ? "正在轉成 EPUB…" : "正在開書…");
         io.execute(() -> {
             ZipFile z = null; Pages p = null;
             try {
                 Books.Epub description = null;
-                if (type.equals("pdf") || type.equals("cbz")) p = new Pages(library.source(entry), type.equals("pdf"));
-                else { z = new ZipFile(library.epub(entry, encoding)); description = Books.epub(z); }
+                if (type.equals("pdf")) {
+                    var inPlace = library.unchangedPdf(entry);
+                    p = inPlace != null ? new Pages(inPlace, () -> library.source(entry)) : new Pages(library.source(entry), true);
+                } else if (type.equals("cbz")) p = new Pages(library.source(entry), false);
+                else {
+                    java.util.function.IntConsumer progress = type.equals("txt") ? percent ->
+                        runOnUiThread(() -> { if (wait.isShowing()) wait.setMessage("正在轉成 EPUB… " + percent + "%"); }) : null;
+                    z = new ZipFile(library.epub(entry, encoding, progress)); description = Books.epub(z);
+                }
                 var finalZip = z; var finalPages = p; var finalDescription = description;
                 runOnUiThread(() -> {
                     if (isDestroyed()) { close(finalZip); close(finalPages); return; }
@@ -467,7 +477,10 @@ public final class ReaderActivity extends Activity {
                 return true;
             }
             @Override public void onPageFinished(WebView view, String url) {
-                if (view != web || !url.equals(chapterUrl(chapter))) return;
+                // Compare decoded paths: WebView may report the address with different escaping.
+                Uri loaded = Uri.parse(url);
+                if (view != web || !HOST.equals(loaded.getHost())
+                    || !("/" + epub.chapters().get(chapter).path()).equals(loaded.getPath())) return;
                 int run = epoch;
                 js("window.bookFixed=" + epub.fixed() + ";\n" + readerScript, result -> {
                     if (run != epoch) return;
@@ -706,12 +719,27 @@ public final class ReaderActivity extends Activity {
         });
     }
 
-    private void snapshot() {
-        if (book == null || busy) return;
+    private void snapshot() { snapshot(false); }
+
+    /**
+     * Records the reading position. Writing the whole shelf on every page turn is wasteful on an
+     * e-reader, so routine saves are batched; leaving the page or the app saves at once.
+     */
+    private void snapshot(boolean now) {
+        if (book == null || busy) {
+            if (now && saveScheduled) { saveScheduled = false; library.save(); }
+            return;
+        }
         put(book, "position", page); put(book, "chapter", chapter);
         put(book, "paragraph", paragraph); put(book, "offset", offset); put(book, "sample", sample);
         if (epub != null) put(book, "anchorPath", epub.chapters().get(chapter).path());
-        library.save();
+        long elapsed = android.os.SystemClock.elapsedRealtime() - lastSave;
+        if (now || elapsed >= 3000) {
+            saveScheduled = false; lastSave = android.os.SystemClock.elapsedRealtime(); library.save();
+        } else if (!saveScheduled) {
+            saveScheduled = true;
+            layout.postDelayed(() -> { if (saveScheduled) snapshot(true); }, 3000 - elapsed);
+        }
     }
 
     private void refreshStatus() {
@@ -837,13 +865,15 @@ public final class ReaderActivity extends Activity {
         for (int i = 0; i < markers.length(); i++) {
             var marker = markers.optJSONObject(i);
             if (marker != null && marker.optInt("chapter") == chapter && marker.optInt("page") == page) {
-                markers.remove(i); library.save(); message("已移除本頁書籤"); return;
+                synchronized (library) { markers.remove(i); }
+                library.save(); message("已移除本頁書籤"); return;
             }
         }
         var marker = new JSONObject();
         put(marker, "chapter", chapter); put(marker, "page", page); put(marker, "paragraph", paragraph);
         put(marker, "offset", offset); put(marker, "sample", sample); put(marker, "label", book.optString("progress"));
-        markers.put(marker); library.save(); message("已加書籤");
+        synchronized (library) { markers.put(marker); }
+        library.save(); message("已加書籤");
     }
 
     private void markers() {
@@ -1077,7 +1107,7 @@ public final class ReaderActivity extends Activity {
     }
 
     private void closeBook() {
-        snapshot(); epoch++;
+        snapshot(true); epoch++;
         JSONObject closing = book;
         book = null; syncVoice();
         if (web != null) { web.stopLoading(); web.destroy(); web = null; }

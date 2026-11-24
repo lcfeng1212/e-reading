@@ -3,6 +3,8 @@ package tw.boox.ereading;
 import android.content.Context;
 import android.net.Uri;
 import android.database.Cursor;
+import android.os.ParcelFileDescriptor;
+import android.provider.DocumentsContract;
 import android.provider.OpenableColumns;
 import org.json.*;
 import java.io.*;
@@ -31,7 +33,21 @@ final class Library {
         context.getSharedPreferences("library", 0).edit().putString("books", new JSONArray(entries).toString()).apply();
     }
 
-    synchronized JSONObject add(Uri uri, boolean retain, boolean durable) throws Exception {
+    /** Size and modification time of a document, or null values when the provider omits them. */
+    private long[] stamp(Uri uri) {
+        long size = -1, modified = -1;
+        try (Cursor cursor = context.getContentResolver().query(uri, null, null, null, null)) {
+            if (cursor != null && cursor.moveToFirst()) {
+                int a = cursor.getColumnIndex(OpenableColumns.SIZE);
+                int b = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_LAST_MODIFIED);
+                if (a >= 0 && !cursor.isNull(a)) size = cursor.getLong(a);
+                if (b >= 0 && !cursor.isNull(b)) modified = cursor.getLong(b);
+            }
+        } catch (Exception ignored) {}
+        return new long[]{size, modified};
+    }
+
+    JSONObject add(Uri uri, boolean retain, boolean durable) throws Exception {
         String name = null;
         try (Cursor cursor = context.getContentResolver().query(uri, new String[]{OpenableColumns.DISPLAY_NAME}, null, null, null)) {
             if (cursor != null && cursor.moveToFirst()) name = cursor.getString(0);
@@ -42,6 +58,8 @@ final class Library {
         if (!FORMATS.contains(type)) throw new IOException("請選擇 TXT、EPUB、MOBI、PDF 或 CBZ 書檔");
         File temp = retain ? null : File.createTempFile("import-", ".tmp", folder);
         try {
+            // Downloading and hashing can take minutes for a cloud file. Do it outside the lock
+            // so the shelf and reading position can still be saved meanwhile.
             var digest = MessageDigest.getInstance("SHA-256");
             try (var in = context.getContentResolver().openInputStream(uri);
                  var out = temp == null ? OutputStream.nullOutputStream() : new FileOutputStream(temp)) {
@@ -50,28 +68,48 @@ final class Library {
                 for (int n; (n = in.read(buffer)) != -1;) { digest.update(buffer, 0, n); out.write(buffer, 0, n); }
             }
             String id = hex(digest.digest()) + "." + type;
-            JSONObject existing = null;
-            for (var item : entries) if (item.optString("id").equals(id)) existing = item;
+            long[] stamp = temp == null ? stamp(uri) : new long[]{-1, -1};
             if (temp != null) commit(temp, new File(folder, id));
-            if (existing != null) {
-                if (!existing.optBoolean("local") || temp != null) {
-                    existing.put("uri", uri.toString());
-                    existing.put("local", temp != null);
-                    save();
+            synchronized (this) {
+                JSONObject existing = null;
+                for (var item : entries) if (item.optString("id").equals(id)) existing = item;
+                if (existing != null) {
+                    if (!existing.optBoolean("local") || temp != null) {
+                        existing.put("uri", uri.toString());
+                        existing.put("local", temp != null);
+                        existing.put("bytes", stamp[0]); existing.put("modified", stamp[1]);
+                        save();
+                    }
+                    return existing;
                 }
-                return existing;
+                var book = new JSONObject();
+                book.put("id", id);
+                book.put("title", name.substring(0, dot));
+                book.put("format", type);
+                book.put("uri", uri.toString());
+                book.put("local", temp != null);
+                book.put("bytes", stamp[0]); book.put("modified", stamp[1]);
+                book.put("added", System.currentTimeMillis());
+                if (!durable && temp == null) throw new IOException("無法保留原檔權限");
+                entries.add(book); save();
+                return book;
             }
-            var book = new JSONObject();
-            book.put("id", id);
-            book.put("title", name.substring(0, dot));
-            book.put("format", type);
-            book.put("uri", uri.toString());
-            book.put("local", temp != null);
-            book.put("added", System.currentTimeMillis());
-            if (!durable && temp == null) throw new IOException("無法保留原檔權限");
-            entries.add(book); save();
-            return book;
         } finally { if (temp != null) temp.delete(); }
+    }
+
+    /**
+     * Opens a PDF kept at its original location without copying it, when the file is unchanged
+     * since import. Returns null when a verified copy is needed instead.
+     */
+    ParcelFileDescriptor unchangedPdf(JSONObject book) {
+        if (book.optBoolean("local") || !book.optString("format").equals("pdf")) return null;
+        long size = book.optLong("bytes", -1), modified = book.optLong("modified", -1);
+        if (size < 0 || modified < 0) return null;
+        Uri uri = Uri.parse(book.optString("uri"));
+        long[] now = stamp(uri);
+        if (now[0] != size || now[1] != modified) return null;
+        try { return context.getContentResolver().openFileDescriptor(uri, "r"); }
+        catch (Exception e) { return null; }
     }
 
     synchronized JSONObject replace(JSONObject old, Uri uri, boolean continueReading) throws Exception {
@@ -129,7 +167,9 @@ final class Library {
         } finally { temp.delete(); }
     }
 
-    File epub(JSONObject book, String manualEncoding) throws IOException {
+    File epub(JSONObject book, String manualEncoding) throws IOException { return epub(book, manualEncoding, null); }
+
+    File epub(JSONObject book, String manualEncoding, java.util.function.IntConsumer progress) throws IOException {
         String type = book.optString("format");
         if (type.equals("epub")) return source(book);
         String selected = manualEncoding == null ? book.optString("encoding", "auto") : manualEncoding;
@@ -140,7 +180,7 @@ final class Library {
         try {
             if (type.equals("mobi")) Mobi.convert(original, temp);
             else Books.txt(original, temp, book.optString("title"),
-                selected.equals("auto") ? Books.charset(original) : Books.named(selected));
+                selected.equals("auto") ? Books.charset(original) : Books.named(selected), progress);
             commit(temp, result);
             return result;
         } finally { temp.delete(); }
@@ -185,8 +225,15 @@ final class Library {
         if (matches != null) for (File file : matches) file.delete();
     }
 
+    /**
+     * Copies of books kept at their original location are temporary. Keep the copy of the book
+     * just closed so reopening it is instant, and delete the others.
+     */
     synchronized void clearCachedSource(JSONObject book) {
-        if (!book.optBoolean("local")) new File(folder, book.optString("id")).delete();
+        for (var item : entries) {
+            if (item == book || item.optBoolean("local")) continue;
+            new File(folder, item.optString("id")).delete();
+        }
     }
 
     private static String hex(byte[] bytes) {

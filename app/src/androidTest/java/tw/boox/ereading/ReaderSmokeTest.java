@@ -26,7 +26,10 @@ public final class ReaderSmokeTest {
         try {
             String input = "第１章 開始\n天晴。<&>\n第两百节 續章\n" + "山水".repeat(27_001);
             Files.write(original.toPath(), input.getBytes(StandardCharsets.UTF_8));
-            Books.txt(original, converted, "小說", Books.charset(original));
+            var progress = new java.util.ArrayList<Integer>();
+            Books.txt(original, converted, "小說", Books.charset(original), progress::add);
+            assertFalse(progress.isEmpty());
+            assertTrue(progress.get(progress.size() - 1) >= 90);
             try (var zip = new ZipFile(converted)) {
                 var book = Books.epub(zip);
                 assertTrue(book.chapters().size() > 2);
@@ -95,6 +98,15 @@ public final class ReaderSmokeTest {
                 assertEquals(1, pages.count());
                 assertTrue(pages.render(0, false).getWidth() > 0);
                 assertTrue(pages.text(0).contains("Offline reader"));
+            }
+            // A PDF kept at its original location renders without a copy; text copies on demand.
+            var copied = new java.util.concurrent.atomic.AtomicBoolean();
+            try (var pages = new Pages(android.os.ParcelFileDescriptor.open(pdf, android.os.ParcelFileDescriptor.MODE_READ_ONLY),
+                () -> { copied.set(true); return pdf; })) {
+                assertTrue(pages.render(0, false).getWidth() > 0);
+                assertFalse(copied.get());
+                assertTrue(pages.text(0).contains("Offline reader"));
+                assertTrue(copied.get());
             }
             try (var zip = new ZipOutputStream(new FileOutputStream(cbz))) {
                 putImage(zip, "10.png", Color.BLACK);
