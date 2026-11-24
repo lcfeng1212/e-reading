@@ -38,7 +38,7 @@ final class Voice {
                     File marker = new File(directory, ".ready");
                     if (!marker.isFile()) {
                         copy("model-cn", directory);
-                        Files.writeString(marker.toPath(), "vosk-model-small-cn-0.22");
+                        Files.write(marker.toPath(), "vosk-model-small-cn-0.22".getBytes(java.nio.charset.StandardCharsets.US_ASCII));
                     }
                     model = new Model(directory.getAbsolutePath());
                 }

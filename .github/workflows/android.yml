@@ -19,7 +19,7 @@ jobs:
           gradle-version: '8.9'
       - uses: android-actions/setup-android@v3
         with:
-          packages: 'platform-tools platforms;android-35 build-tools;35.0.0'
+          packages: 'platform-tools platforms;android-35 build-tools;35.0.0 ndk;27.2.12479018 cmake;3.22.1'
       - name: Prepare offline Chinese voice model
         run: |
           curl --fail --location --retry 3 https://alphacephei.com/vosk/models/vosk-model-small-cn-0.22.zip -o /tmp/boox-model.zip
@@ -38,9 +38,30 @@ jobs:
           cat /tmp/opencc/data/dictionary/TWPhrases*.txt > app/src/main/assets/opencc/TWPhrases.txt
           test -s app/src/main/assets/opencc/TWPhrases.txt
           cp /tmp/opencc/LICENSE app/src/main/assets/opencc/
+      - name: Prepare unprotected MOBI parser
+        run: |
+          curl --fail --location --retry 3 https://codeload.github.com/bfabiszewski/libmobi/tar.gz/refs/tags/v0.12 -o /tmp/libmobi.tar.gz
+          mkdir -p vendor/libmobi app/src/main/assets/libmobi
+          tar -xzf /tmp/libmobi.tar.gz -C vendor/libmobi --strip-components=1
+          cp vendor/libmobi/COPYING* app/src/main/assets/libmobi/
+          mkdir -p app/src/androidTest/assets
+          cp vendor/libmobi/tests/samples/sample-unicode-{huffdic,uncompressed}.mobi app/src/androidTest/assets/
       - run: gradle :app:assembleDebug
       - uses: actions/upload-artifact@v4
         with:
           name: BOOX-Go7-e-reading
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
+      - name: Enable Android emulator acceleration
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-boox-kvm.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Exercise the Android 13 reader
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 33
+          arch: x86_64
+          target: google_apis
+          disable-animations: true
+          script: gradle :app:connectedDebugAndroidTest

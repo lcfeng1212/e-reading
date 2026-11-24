@@ -138,7 +138,7 @@ final class Library {
         File original = source(book);
         File temp = File.createTempFile("conversion-", ".tmp", folder);
         try {
-            if (type.equals("mobi")) Books.mobi(original, temp, book.optString("title"));
+            if (type.equals("mobi")) Mobi.convert(original, temp);
             else Books.txt(original, temp, book.optString("title"),
                 selected.equals("auto") ? Books.charset(original) : java.nio.charset.Charset.forName(selected));
             commit(temp, result);

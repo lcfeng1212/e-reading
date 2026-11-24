@@ -1,13 +1,12 @@
 package tw.boox.ereading;
 
-import android.icu.text.CharsetDetector;
+import com.ibm.icu.text.CharsetDetector;
 import android.text.TextUtils;
 import android.util.Xml;
 import org.xmlpull.v1.XmlPullParser;
 import java.io.*;
 import java.net.URI;
 import java.nio.charset.*;
-import java.nio.file.*;
 import java.util.*;
 import java.util.regex.Pattern;
 import java.util.zip.*;
@@ -103,114 +102,6 @@ final class Books {
         }
     }
 
-    static void mobi(File raw, File dest, String title) throws IOException {
-        try (var in = new RandomAccessFile(raw, "r")) {
-            in.seek(60);
-            if (in.readInt() != 0x424f4f4b || in.readInt() != 0x4d4f4249)
-                throw new IOException("無法辨識這個 MOBI 檔案");
-            in.seek(76);
-            int count = in.readUnsignedShort();
-            if (count < 2) throw new IOException("MOBI 沒有文字記錄");
-            long[] offsets = new long[count + 1];
-            for (int i = 0; i < count; i++) {
-                offsets[i] = Integer.toUnsignedLong(in.readInt());
-                in.readInt();
-            }
-            offsets[count] = in.length();
-            for (int i = 0; i < count; i++)
-                if (offsets[i] < 78L + count * 8 || offsets[i] >= offsets[i + 1])
-                    throw new IOException("MOBI 記錄表損毀");
-            in.seek(offsets[0]);
-            int compression = in.readUnsignedShort();
-            in.skipBytes(2);
-            int textSize = in.readInt();
-            int records = in.readUnsignedShort();
-            in.skipBytes(2);
-            if (in.readUnsignedShort() != 0) throw new IOException("這個 MOBI 有數位版權保護");
-            in.skipBytes(2);
-            if (offsets[1] - offsets[0] < 40 || in.readInt() != 0x4d4f4249)
-                throw new IOException("MOBI 標頭不完整");
-            int headerLength = in.readInt();
-            in.skipBytes(4);
-            int codePage = in.readInt();
-            in.skipBytes(4);
-            int version = in.readInt();
-            if (version >= 8 || compression != 1 && compression != 2)
-                throw new IOException("此 MOBI 版本或壓縮格式暫不支援");
-            if (textSize <= 0 || textSize > 64 * 1024 * 1024 || records <= 0 || records >= count)
-                throw new IOException("MOBI 文字記錄大小不符");
-            int extra = 0;
-            if (headerLength >= 228 && offsets[1] - offsets[0] >= 244) {
-                in.seek(offsets[0] + 242);
-                extra = in.readUnsignedShort();
-            }
-            var output = new ByteArrayOutputStream();
-            for (int i = 1; i <= records && output.size() < textSize; i++) {
-                long length = offsets[i + 1] - offsets[i];
-                if (length > 1024 * 1024) throw new IOException("MOBI 記錄過大");
-                var bytes = new byte[(int) length];
-                in.seek(offsets[i]); in.readFully(bytes);
-                int used = trimMobi(bytes, extra);
-                byte[] decoded = compression == 2 ? palm(bytes, used) : Arrays.copyOf(bytes, used);
-                output.write(decoded, 0, Math.min(decoded.length, textSize - output.size()));
-            }
-            if (output.size() != textSize) throw new IOException("MOBI 正文不完整");
-            Charset encoding = codePage == 65001 ? StandardCharsets.UTF_8 : Charset.forName("windows-1252");
-            String body = output.toString(encoding).replaceAll("(?is)<(?:script|style)\\b[^>]*>.*?</(?:script|style)>", "");
-            String plain = android.text.Html.fromHtml(body, android.text.Html.FROM_HTML_MODE_LEGACY).toString();
-            if (plain.isBlank()) throw new IOException("MOBI 沒有可讀正文");
-            File temp = File.createTempFile("mobi-", ".txt", dest.getParentFile());
-            try {
-                Files.writeString(temp.toPath(), plain, StandardCharsets.UTF_8);
-                txt(temp, dest, title, StandardCharsets.UTF_8);
-            } finally { temp.delete(); }
-        }
-    }
-
-    private static int trimMobi(byte[] data, int flags) throws IOException {
-        int end = data.length;
-        for (int bits = flags >>> 1; bits != 0; bits >>>= 1) {
-            if ((bits & 1) == 0) continue;
-            int size = 0;
-            for (int shift = 0, i = end - 1; i >= 0 && shift < 28; i--, shift += 7) {
-                int b = data[i] & 255;
-                size |= (b & 127) << shift;
-                if ((b & 128) != 0) break;
-            }
-            if (size <= 0 || size > end) throw new IOException("MOBI 記錄附註損毀");
-            end -= size;
-        }
-        if ((flags & 1) != 0 && end > 0) end -= (data[end - 1] & 3) + 1;
-        if (end < 0) throw new IOException("MOBI 記錄附註損毀");
-        return end;
-    }
-
-    private static byte[] palm(byte[] input, int end) throws IOException {
-        byte[] decoded = new byte[65_536];
-        int size = 0;
-        for (int i = 0; i < end;) {
-            int c = input[i++] & 255;
-            if (size > decoded.length - 12) throw new IOException("MOBI 記錄解壓異常");
-            if (c == 0 || c >= 9 && c <= 127) decoded[size++] = (byte)c;
-            else if (c <= 8) {
-                if (i + c > end) throw new IOException("MOBI 記錄不完整");
-                System.arraycopy(input, i, decoded, size, c);
-                i += c; size += c;
-            } else if (c >= 192) {
-                decoded[size++] = 32;
-                decoded[size++] = (byte)(c ^ 128);
-            } else {
-                if (i >= end) throw new IOException("MOBI 記錄不完整");
-                int pair = c << 8 | input[i++] & 255;
-                int distance = (pair >>> 3) & 2047;
-                int length = (pair & 7) + 3;
-                if (distance == 0 || distance > size) throw new IOException("MOBI 記錄索引異常");
-                for (int j = 0; j < length; j++) { decoded[size] = decoded[size - distance]; size++; }
-            }
-        }
-        return Arrays.copyOf(decoded, size);
-    }
-
     static Epub epub(ZipFile zip) throws Exception {
         String root = null;
         var container = xml(zip, "META-INF/container.xml");
@@ -223,7 +114,7 @@ final class Books {
         var manifest = new HashMap<String, String>();
         var spine = new ArrayList<String>();
         var opf = xml(zip, root);
-        String nav = null;
+        String nav = null, ncx = null;
         boolean fixed = false, rtl = false;
         for (int type = opf.getEventType(); type != XmlPullParser.END_DOCUMENT; type = opf.next()) {
             if (type != XmlPullParser.START_TAG) continue;
@@ -234,6 +125,7 @@ final class Books {
                     if (href != null) {
                         String path = resolve(root, href);
                         manifest.put(opf.getAttributeValue(null, "id"), path);
+                        if ("application/x-dtbncx+xml".equals(opf.getAttributeValue(null, "media-type"))) ncx = path;
                         if (properties != null && Arrays.asList(properties.split("\\s+")).contains("nav"))
                             nav = path;
                     }
@@ -262,6 +154,20 @@ final class Books {
                     if (!label.toString().isBlank()) titles.putIfAbsent(resolve(nav, href), label.toString().strip());
                 }
             } catch (Exception ignored) { /* A broken optional navigation file does not block reading. */ }
+        }
+        if (ncx != null && titles.isEmpty()) {
+            try {
+                var menu = xml(zip, ncx);
+                String label = "";
+                for (int type = menu.getEventType(); type != XmlPullParser.END_DOCUMENT; type = menu.next()) {
+                    if (type != XmlPullParser.START_TAG) continue;
+                    if (menu.getName().equals("text")) label = menu.nextText().strip();
+                    if (menu.getName().equals("content")) {
+                        String href = menu.getAttributeValue(null, "src");
+                        if (href != null && !label.isEmpty()) titles.putIfAbsent(resolve(ncx, href), label);
+                    }
+                }
+            } catch (Exception ignored) { /* Navigation is optional. */ }
         }
         var paths = new ArrayList<Chapter>();
         for (String id : spine) {

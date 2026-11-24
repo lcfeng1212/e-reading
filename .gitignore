@@ -3,3 +3,9 @@
 local.properties
 .idea/
 *.iml
+**/.cxx/
+vendor/
+app/src/main/assets/model-cn/
+app/src/main/assets/opencc/
+app/src/main/assets/libmobi/
+app/src/androidTest/assets/*.mobi
