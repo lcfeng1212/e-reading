@@ -56,6 +56,20 @@ jobs:
           name="e-reading-v$version"
           cp app/build/outputs/apk/debug/app-debug.apk "$name.apk"
           echo "name=$name" >> "$GITHUB_OUTPUT"
+      - name: Report APK size by part
+        run: |
+          python3 - "${{ steps.apk.outputs.name }}.apk" <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import collections, os, sys, zipfile
+          path = sys.argv[1]
+          parts = collections.Counter()
+          for item in zipfile.ZipFile(path).infolist():
+              name = item.filename
+              key = '/'.join(name.split('/')[:2]) if name.startswith(('lib/', 'assets/')) else name.split('/')[0]
+              if key.startswith('classes') and key.endswith('.dex'): key = 'classes*.dex'
+              parts[key] += item.compress_size
+          print(f"### APK {os.path.getsize(path) / 1e6:.1f} MB\n\n| 大小 (MB) | 部分 |\n|---:|---|")
+          for key, size in parts.most_common(15): print(f"| {size / 1e6:.2f} | `{key}` |")
+          PY
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.apk.outputs.name }}

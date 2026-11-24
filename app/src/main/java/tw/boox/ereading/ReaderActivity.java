@@ -44,6 +44,8 @@ public final class ReaderActivity extends Activity {
     // The latest turn requested while a page is loading. Only one is kept, so presses do not pile up.
     private int queuedTurn;
     private long lastSave;
+    // Not a view: posts on a view replaced by setContentView never run.
+    private final android.os.Handler main = new android.os.Handler(android.os.Looper.getMainLooper());
     // Cumulative chapter sizes, so progress reflects how much of the book has been read.
     private long[] weights;
     private boolean saveScheduled;
@@ -492,6 +494,17 @@ public final class ReaderActivity extends Activity {
                 }
                 return true;
             }
+            // Without this, Android kills the whole app when the page renderer dies, e.g. under
+            // memory pressure. Rebuild the page at the last known position instead.
+            @Override public boolean onRenderProcessGone(WebView view, RenderProcessGoneDetail detail) {
+                if (view != web || book == null) { view.destroy(); return true; }
+                content.removeView(web);
+                web.destroy(); web = null;
+                epoch++; busy = false; queuedTurn = 0;
+                message("閱讀頁已重新載入");
+                createWeb();
+                return true;
+            }
             @Override public void onPageFinished(WebView view, String url) {
                 // Compare decoded paths: WebView may report the address with different escaping.
                 Uri loaded = Uri.parse(url);
@@ -717,7 +730,7 @@ public final class ReaderActivity extends Activity {
         if (queuedTurn == 0 || book == null) return;
         int delta = queuedTurn;
         queuedTurn = 0;
-        layout.post(() -> turn(delta));
+        main.post(() -> turn(delta));
     }
 
     private void turn(int delta) {
@@ -760,7 +773,7 @@ public final class ReaderActivity extends Activity {
             saveScheduled = false; lastSave = android.os.SystemClock.elapsedRealtime(); library.save();
         } else if (!saveScheduled) {
             saveScheduled = true;
-            layout.postDelayed(() -> { if (saveScheduled) snapshot(true); }, 3000 - elapsed);
+            main.postDelayed(() -> { if (saveScheduled) snapshot(true); }, 3000 - elapsed);
         }
     }
 
@@ -1160,6 +1173,7 @@ public final class ReaderActivity extends Activity {
         snapshot(true); epoch++;
         JSONObject closing = book;
         book = null; syncVoice();
+        main.removeCallbacksAndMessages(null);
         if (web != null) { web.stopLoading(); web.destroy(); web = null; }
         image = null;
         ZipFile z = zip; Pages p = pages;
