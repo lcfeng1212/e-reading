@@ -21,6 +21,11 @@ final class Library {
         this.context = context;
         folder = new File(context.getFilesDir(), "books");
         folder.mkdirs();
+        // Temporary files are removed in finally blocks, but not when the process is killed mid-import.
+        // A file still being written keeps a fresh modification time, so only stale ones go.
+        long stale = System.currentTimeMillis() - 10 * 60 * 1000;
+        File[] leftovers = folder.listFiles((dir, name) -> name.endsWith(".tmp"));
+        if (leftovers != null) for (File file : leftovers) if (file.lastModified() < stale) file.delete();
         try {
             var saved = new JSONArray(context.getSharedPreferences("library", 0).getString("books", "[]"));
             for (int i = 0; i < saved.length(); i++) entries.add(saved.getJSONObject(i));
