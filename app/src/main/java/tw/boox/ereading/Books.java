@@ -139,6 +139,7 @@ final class Books {
             }
             if (html.length() > 0) epub.chapter(html.toString(), heading, toc);
             epub.finish();
+            if (progress != null) progress.accept(100);
         }
     }
 

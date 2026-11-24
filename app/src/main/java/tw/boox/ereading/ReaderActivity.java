@@ -44,6 +44,8 @@ public final class ReaderActivity extends Activity {
     // The latest turn requested while a page is loading. Only one is kept, so presses do not pile up.
     private int queuedTurn;
     private long lastSave;
+    // Cumulative chapter sizes, so progress reflects how much of the book has been read.
+    private long[] weights;
     private boolean saveScheduled;
     private double offset;
     private String sample = "";
@@ -369,7 +371,15 @@ public final class ReaderActivity extends Activity {
                     if (isDestroyed()) { close(finalZip); close(finalPages); return; }
                     operation = false; wait.dismiss();
                     book = entry; zip = finalZip; epub = finalDescription; pages = finalPages;
-                    page = Math.max(0, entry.optInt("position"));
+                    weights = null;
+                    if (epub != null) {
+                        weights = new long[epub.chapters().size() + 1];
+                        for (int i = 0; i < epub.chapters().size(); i++) {
+                            var item = zip.getEntry(epub.chapters().get(i).path());
+                            weights[i + 1] = weights[i] + Math.max(1, item == null ? 1 : item.getSize());
+                        }
+                    }
+                    page = Math.max(-1, entry.optInt("position"));
                     chapter = epub == null ? 0 : Math.min(epub.chapters().size() - 1, Math.max(0, entry.optInt("chapter")));
                     if (epub != null && entry.has("anchorPath")) {
                         String anchorPath = entry.optString("anchorPath");
@@ -595,7 +605,10 @@ public final class ReaderActivity extends Activity {
             page = state.getInt("page"); paragraph = state.optInt("paragraph", -1);
             offset = state.optDouble("offset", 0); sample = state.optString("sample");
             int total = Math.max(1, state.optInt("total", 1));
-            int percent = (int) Math.round(100d * (chapter + (page + 1d) / total) / epub.chapters().size());
+            int percent = weights == null
+                ? (int) Math.round(100d * (chapter + (page + 1d) / total) / epub.chapters().size())
+                : (int) Math.round(100d * (weights[chapter] + (weights[chapter + 1] - weights[chapter]) * (page + 1d) / total)
+                    / weights[weights.length - 1]);
             put(book, "progress", Math.max(1, Math.min(100, percent)) + "%");
             snapshot();
         } catch (Exception ignored) {}
@@ -615,7 +628,7 @@ public final class ReaderActivity extends Activity {
             return pinch.isInProgress() || readerTouch(v, e);
         });
         content.addView(image, new FrameLayout.LayoutParams(-1, -1));
-        page = Math.min(page, pages.count() - 1);
+        page = Math.max(0, Math.min(page, pages.count() - 1));
         renderImage();
     }
 
@@ -732,10 +745,13 @@ public final class ReaderActivity extends Activity {
      * e-reader, so routine saves are batched; leaving the page or the app saves at once.
      */
     private void snapshot(boolean now) {
-        if (book == null || busy) {
+        if (book == null) {
             if (now && saveScheduled) { saveScheduled = false; library.save(); }
             return;
         }
+        // While a chapter loads, the fields already name its target (page -1 is its last page),
+        // so leaving the book at that moment still records where the reader was heading.
+        if (busy && !now) return;
         put(book, "position", page); put(book, "chapter", chapter);
         put(book, "paragraph", paragraph); put(book, "offset", offset); put(book, "sample", sample);
         if (epub != null) put(book, "anchorPath", epub.chapters().get(chapter).path());
@@ -868,13 +884,39 @@ public final class ReaderActivity extends Activity {
     private void bookmark() {
         if (busy) return;
         var markers = bookmarkList();
+        if (pages != null) {
+            for (int i = 0; i < markers.length(); i++) {
+                var marker = markers.optJSONObject(i);
+                if (marker != null && marker.optInt("page") == page) { removeBookmark(markers, i); return; }
+            }
+            addBookmark(markers);
+            return;
+        }
+        // Page numbers move when the font size changes. Ask the page which saved anchors it holds.
+        var indexes = new ArrayList<Integer>();
+        var anchors = new JSONArray();
         for (int i = 0; i < markers.length(); i++) {
             var marker = markers.optJSONObject(i);
-            if (marker != null && marker.optInt("chapter") == chapter && marker.optInt("page") == page) {
-                synchronized (library) { markers.remove(i); }
-                library.save(); message("已移除本頁書籤"); return;
-            }
+            if (marker == null || marker.optInt("chapter") != chapter) continue;
+            indexes.add(i);
+            anchors.put(new JSONArray().put(marker.optInt("paragraph", -1)).put(marker.optDouble("offset", 0))
+                .put(marker.optString("sample")));
         }
+        if (indexes.isEmpty()) { addBookmark(markers); return; }
+        js("reader.onPage(" + anchors + ")", value -> {
+            int found;
+            try { found = Integer.parseInt(value); } catch (NumberFormatException e) { found = -1; }
+            if (found >= 0 && found < indexes.size()) removeBookmark(markers, indexes.get(found));
+            else addBookmark(markers);
+        });
+    }
+
+    private void removeBookmark(JSONArray markers, int index) {
+        synchronized (library) { markers.remove(index); }
+        library.save(); message("已移除本頁書籤");
+    }
+
+    private void addBookmark(JSONArray markers) {
         var marker = new JSONObject();
         put(marker, "chapter", chapter); put(marker, "page", page); put(marker, "paragraph", paragraph);
         put(marker, "offset", offset); put(marker, "sample", sample); put(marker, "label", book.optString("progress"));
