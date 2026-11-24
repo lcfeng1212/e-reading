@@ -132,19 +132,22 @@
       (settings.night ? 'body *:not(img):not(svg):not(path){color:inherit!important;background-color:transparent!important;}' : '');
     return state();
   }
-  function locate(page, paragraph, offset, sample) {
-    if (fixed) return go(0);
+  // The page holding a stored anchor, or -1 when it cannot be found in this chapter.
+  function pageOf(paragraph, offset, sample) {
     let entry = nodes[paragraph];
     if (sample && (!entry || !entry.text.trim().startsWith(sample)))
       entry = nodes.find(item => item.text.trim().startsWith(sample)) || entry;
-    if (entry && entry.node.length) {
-      // Round, not floor: the stored ratio can land a hair below the first visible character.
-      const rect = glyph(entry.node, Math.min(entry.node.length - 1, Math.round(entry.node.length * offset)));
-      if (rect.width > 0) {
-        const absolute = rtl ? position * width() + width() - centre(rect) : centre(rect) + position * width();
-        return go(Math.floor(Math.max(0, absolute) / width()));
-      }
-    }
+    if (!entry || !entry.node.length) return -1;
+    // Round, not floor: the stored ratio can land a hair below the first visible character.
+    const rect = glyph(entry.node, Math.min(entry.node.length - 1, Math.round(entry.node.length * offset)));
+    if (rect.width <= 0) return -1;
+    const absolute = rtl ? position * width() + width() - centre(rect) : centre(rect) + position * width();
+    return Math.floor(Math.max(0, absolute) / width());
+  }
+  function locate(page, paragraph, offset, sample) {
+    if (fixed) return go(0);
+    const found = pageOf(paragraph, offset, sample);
+    if (found >= 0) return go(found);
     return go(page < 0 ? total() - 1 : page);
   }
   function visibleText() {
@@ -166,7 +169,11 @@
     return result.join('\n');
   }
   window.reader = {
-    state, layout, locate, go, turn: delta => {
+    state, layout, locate, go,
+    // Index of the first anchor [paragraph, offset, sample] that falls on the current page.
+    onPage: anchors => fixed ? (anchors.length ? 0 : -1)
+      : anchors.findIndex(([paragraph, offset, sample]) => pageOf(paragraph, offset, sample) === position),
+    turn: delta => {
       const next = position + delta;
       return next < 0 || next >= total() ? null : go(next);
     },

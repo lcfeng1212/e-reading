@@ -1,6 +1,5 @@
 package tw.boox.ereading;
 
-import com.ibm.icu.text.CharsetDetector;
 import android.text.TextUtils;
 import android.util.Xml;
 import org.xmlpull.v1.XmlPullParser;
@@ -28,13 +27,49 @@ final class Books {
             var decoder = StandardCharsets.UTF_8.newDecoder();
             var check = decoder.decode(input, java.nio.CharBuffer.allocate(prefix.length), false);
             if (!check.isError()) return StandardCharsets.UTF_8;
-            var match = new CharsetDetector().setText(prefix).detect();
-            if (match != null && match.getConfidence() >= 40
-                && (match.getName().equalsIgnoreCase("Big5") || match.getName().equalsIgnoreCase("GB18030"))) {
-                return named(match.getName());
-            }
+            Charset guess = chinese(prefix);
+            if (guess != null) return guess;
             throw new CharacterCodingException();
         }
+    }
+
+    // Characters common in both Traditional and Simplified novels, in either script.
+    private static final String COMMON =
+        "的一是不了人我在有他這这中大來来上國国個个到說说們们為为子和你地出道也時时年得就那要下以生會会自著着去之過过家學学對对可"
+        + "她裡里後后小麼么心多天而能好都然沒没日於于起還还發发成事只作當当想看文無无開开手十用主行方又如前所本見见經经頭头面公同三已"
+        + "老從从動动兩两長长知民樣样現现分將将外但身些與与高意進进把法此實实回二理美點点月明其種种聲声全工己話话兒儿者向情部正名定女問问"
+        + "力機机給给等幾几很業业最間间新什打便位因重被走電电四第門门相次東东政海口使教西再平真聽听世氣气信北少關关并內内加化由卻却代軍军";
+
+    /**
+     * Picks Big5 (code page 950) or GB18030 for Chinese text that is not UTF-8. A strict decode
+     * rules one out in most files; when both decode, the one yielding more common characters wins.
+     * This replaces ICU4J's detector and the 12 MB library it came with.
+     */
+    static Charset chinese(byte[] prefix) {
+        Charset big5 = named("Big5"), gb = Charset.forName("GB18030");
+        String a = strict(prefix, big5), b = strict(prefix, gb);
+        int sa = a == null ? -1 : common(a), sb = b == null ? -1 : common(b);
+        String best = sa >= sb ? a : b;
+        // Novels are roughly a third common characters; misread bytes are a few percent at most.
+        // Below one in twenty, let the reader pick the encoding instead of showing garbage.
+        if (best == null || Math.max(sa, sb) * 20 < Math.min(best.length(), 4000)) return null;
+        return sa >= sb ? big5 : gb;
+    }
+
+    private static String strict(byte[] bytes, Charset charset) {
+        try {
+            var out = java.nio.CharBuffer.allocate(bytes.length + 16);
+            var result = charset.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
+                .onUnmappableCharacter(CodingErrorAction.REPORT)
+                .decode(java.nio.ByteBuffer.wrap(bytes), out, false);   // a cut-off last character is fine
+            return result.isError() ? null : out.flip().toString();
+        } catch (Exception e) { return null; }
+    }
+
+    private static int common(String text) {
+        int score = 0;
+        for (int i = 0; i < text.length(); i++) if (COMMON.indexOf(text.charAt(i)) >= 0) score++;
+        return score;
     }
 
     /**
@@ -60,9 +95,27 @@ final class Books {
     }
 
     static void txt(File raw, File dest, String title, Charset encoding) throws IOException {
+        txt(raw, dest, title, encoding, null);
+    }
+
+    /** Converts a TXT file, reporting progress from 0 to 100 as the file is read. */
+    static void txt(File raw, File dest, String title, Charset encoding,
+                    java.util.function.IntConsumer progress) throws IOException {
         var decoder = encoding.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
             .onUnmappableCharacter(CodingErrorAction.REPORT);
-        try (var text = new BufferedReader(new InputStreamReader(new FileInputStream(raw), decoder));
+        long length = Math.max(1, raw.length());
+        var source = new FilterInputStream(new FileInputStream(raw)) {
+            long read; int reported = -1;
+            private void count(long n) {
+                if (n <= 0 || progress == null) return;
+                read += n;
+                int percent = (int) Math.min(99, read * 100 / length);
+                if (percent != reported) { reported = percent; progress.accept(percent); }
+            }
+            @Override public int read() throws IOException { int b = super.read(); if (b >= 0) count(1); return b; }
+            @Override public int read(byte[] b, int off, int len) throws IOException { int n = super.read(b, off, len); count(n); return n; }
+        };
+        try (var text = new BufferedReader(new InputStreamReader(source, decoder), 64 * 1024);
              var epub = new EpubOutput(dest, title)) {
             var html = new StringBuilder();
             String heading = "正文";
@@ -121,6 +174,7 @@ final class Books {
             }
             if (html.length() > 0) epub.chapter(html.toString(), heading, toc);
             epub.finish();
+            if (progress != null) progress.accept(100);
         }
     }
 

@@ -10,14 +10,25 @@ import java.util.*;
 import java.util.zip.*;
 
 final class Pages implements Closeable {
-    private final File file;
+    private File file;
+    private final java.util.concurrent.Callable<File> textSource;
     private final PdfRenderer pdf;
     private final ZipFile zip;
     private final List<String> images = new ArrayList<>();
     private PDDocument document;
 
+    /** A PDF read in place. Text extraction for translation copies it on first use. */
+    Pages(ParcelFileDescriptor descriptor, java.util.concurrent.Callable<File> textSource) throws IOException {
+        this.file = null;
+        this.textSource = textSource;
+        try { pdf = new PdfRenderer(descriptor); }
+        catch (IOException | RuntimeException e) { descriptor.close(); throw e; }
+        zip = null;
+    }
+
     Pages(File file, boolean isPdf) throws IOException {
         this.file = file;
+        this.textSource = null;
         pdf = isPdf ? new PdfRenderer(ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)) : null;
         zip = isPdf ? null : new ZipFile(file);
         if (zip != null) {
@@ -58,6 +69,11 @@ final class Pages implements Closeable {
 
     synchronized String text(int page) throws IOException {
         if (pdf == null) return "";
+        if (file == null) {
+            try { file = textSource.call(); }
+            catch (IOException e) { throw e; }
+            catch (Exception e) { throw new IOException(e.getMessage(), e); }
+        }
         if (document == null) document = PDDocument.load(file, com.tom_roush.pdfbox.io.MemoryUsageSetting.setupTempFileOnly());
         var stripper = new PDFTextStripper();
         stripper.setSortByPosition(true);

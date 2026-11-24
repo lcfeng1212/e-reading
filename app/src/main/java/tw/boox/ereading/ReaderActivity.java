@@ -43,6 +43,12 @@ public final class ReaderActivity extends Activity {
     private int chapter, page, paragraph = -1, epoch;
     // The latest turn requested while a page is loading. Only one is kept, so presses do not pile up.
     private int queuedTurn;
+    private long lastSave;
+    // Not a view: posts on a view replaced by setContentView never run.
+    private final android.os.Handler main = new android.os.Handler(android.os.Looper.getMainLooper());
+    // Cumulative chapter sizes, so progress reflects how much of the book has been read.
+    private long[] weights;
+    private boolean saveScheduled;
     private double offset;
     private String sample = "";
     private boolean busy, toolbar, active, voiceOn, voiceRunning, operation, pendingRotate;
@@ -60,7 +66,10 @@ public final class ReaderActivity extends Activity {
         library = new Library(this);
         chinese = new Chinese(this);
         PDFBoxResourceLoader.init(getApplicationContext());
-        voiceOn = getPreferences(0).getBoolean("voice", false);
+        // Voice page turning starts off every time the app starts. It stays on through a lock
+        // screen or a trip to the shelf until the app is closed.
+        voiceOn = false;
+        getPreferences(0).edit().remove("voice").apply();
         voice = new Voice(this, new Voice.Listener() {
             @Override public void page(int delta) { runOnUiThread(() -> { if (voiceRunning && active) turn(delta); }); }
             @Override public void state(String text) { runOnUiThread(() -> { if (voiceRunning) { voiceState = text; refreshStatus(); } }); }
@@ -81,7 +90,7 @@ public final class ReaderActivity extends Activity {
             importFiles(List.of(intent.getData()), intent.getFlags());
     }
     @Override protected void onResume() { super.onResume(); active = true; syncVoice(); }
-    @Override protected void onPause() { active = false; syncVoice(); snapshot(); super.onPause(); }
+    @Override protected void onPause() { active = false; syncVoice(); snapshot(true); super.onPause(); }
     @Override protected void onDestroy() {
         closeBook(); voice.close();
         if (translator != null) translator.close();
@@ -132,8 +141,9 @@ public final class ReaderActivity extends Activity {
     private void base() { layout = column(); layout.setBackgroundColor(Color.WHITE); setContentView(layout); }
     private void message(String text) { Toast.makeText(this, text, Toast.LENGTH_LONG).show(); }
     private void error(Exception e) { message(e.getMessage() == null ? "操作失敗" : e.getMessage()); }
+    // Book records are serialized by Library on the I/O thread too. Edit them under its lock.
     private void put(JSONObject target, String key, Object value) {
-        try { target.put(key, value); } catch (JSONException ignored) {}
+        synchronized (library) { try { target.put(key, value); } catch (JSONException ignored) {} }
     }
 
     private void shelf(String query) {
@@ -341,19 +351,37 @@ public final class ReaderActivity extends Activity {
         closeBook();
         operation = true;
         String type = entry.optString("format");
-        var wait = progress(type.equals("txt") ? "正在準備 EPUB…" : "正在開書…");
+        var wait = progress(type.equals("txt") ? "正在轉成 EPUB…" : "正在開書…");
         io.execute(() -> {
             ZipFile z = null; Pages p = null;
             try {
                 Books.Epub description = null;
-                if (type.equals("pdf") || type.equals("cbz")) p = new Pages(library.source(entry), type.equals("pdf"));
-                else { z = new ZipFile(library.epub(entry, encoding)); description = Books.epub(z); }
+                if (type.equals("pdf")) {
+                    var inPlace = library.unchangedPdf(entry);
+                    // Some providers return a descriptor PdfRenderer cannot seek. Fall back to a copy.
+                    if (inPlace != null) try { p = new Pages(inPlace, () -> library.source(entry)); }
+                        catch (Exception unreadable) { p = null; }
+                    if (p == null) p = new Pages(library.source(entry), true);
+                } else if (type.equals("cbz")) p = new Pages(library.source(entry), false);
+                else {
+                    java.util.function.IntConsumer progress = type.equals("txt") ? percent ->
+                        runOnUiThread(() -> { if (wait.isShowing()) wait.setMessage("正在轉成 EPUB… " + percent + "%"); }) : null;
+                    z = new ZipFile(library.epub(entry, encoding, progress)); description = Books.epub(z);
+                }
                 var finalZip = z; var finalPages = p; var finalDescription = description;
                 runOnUiThread(() -> {
                     if (isDestroyed()) { close(finalZip); close(finalPages); return; }
                     operation = false; wait.dismiss();
                     book = entry; zip = finalZip; epub = finalDescription; pages = finalPages;
-                    page = Math.max(0, entry.optInt("position"));
+                    weights = null;
+                    if (epub != null) {
+                        weights = new long[epub.chapters().size() + 1];
+                        for (int i = 0; i < epub.chapters().size(); i++) {
+                            var item = zip.getEntry(epub.chapters().get(i).path());
+                            weights[i + 1] = weights[i] + Math.max(1, item == null ? 1 : item.getSize());
+                        }
+                    }
+                    page = Math.max(-1, entry.optInt("position"));
                     chapter = epub == null ? 0 : Math.min(epub.chapters().size() - 1, Math.max(0, entry.optInt("chapter")));
                     if (epub != null && entry.has("anchorPath")) {
                         String anchorPath = entry.optString("anchorPath");
@@ -466,8 +494,22 @@ public final class ReaderActivity extends Activity {
                 }
                 return true;
             }
+            // Without this, Android kills the whole app when the page renderer dies, e.g. under
+            // memory pressure. Rebuild the page at the last known position instead.
+            @Override public boolean onRenderProcessGone(WebView view, RenderProcessGoneDetail detail) {
+                if (view != web || book == null) { view.destroy(); return true; }
+                content.removeView(web);
+                web.destroy(); web = null;
+                epoch++; busy = false; queuedTurn = 0;
+                message("閱讀頁已重新載入");
+                createWeb();
+                return true;
+            }
             @Override public void onPageFinished(WebView view, String url) {
-                if (view != web || !url.equals(chapterUrl(chapter))) return;
+                // Compare decoded paths: WebView may report the address with different escaping.
+                Uri loaded = Uri.parse(url);
+                if (view != web || !HOST.equals(loaded.getHost())
+                    || !("/" + epub.chapters().get(chapter).path()).equals(loaded.getPath())) return;
                 int run = epoch;
                 js("window.bookFixed=" + epub.fixed() + ";\n" + readerScript, result -> {
                     if (run != epoch) return;
@@ -576,7 +618,10 @@ public final class ReaderActivity extends Activity {
             page = state.getInt("page"); paragraph = state.optInt("paragraph", -1);
             offset = state.optDouble("offset", 0); sample = state.optString("sample");
             int total = Math.max(1, state.optInt("total", 1));
-            int percent = (int) Math.round(100d * (chapter + (page + 1d) / total) / epub.chapters().size());
+            int percent = weights == null
+                ? (int) Math.round(100d * (chapter + (page + 1d) / total) / epub.chapters().size())
+                : (int) Math.round(100d * (weights[chapter] + (weights[chapter + 1] - weights[chapter]) * (page + 1d) / total)
+                    / weights[weights.length - 1]);
             put(book, "progress", Math.max(1, Math.min(100, percent)) + "%");
             snapshot();
         } catch (Exception ignored) {}
@@ -596,7 +641,7 @@ public final class ReaderActivity extends Activity {
             return pinch.isInProgress() || readerTouch(v, e);
         });
         content.addView(image, new FrameLayout.LayoutParams(-1, -1));
-        page = Math.min(page, pages.count() - 1);
+        page = Math.max(0, Math.min(page, pages.count() - 1));
         renderImage();
     }
 
@@ -685,7 +730,7 @@ public final class ReaderActivity extends Activity {
         if (queuedTurn == 0 || book == null) return;
         int delta = queuedTurn;
         queuedTurn = 0;
-        layout.post(() -> turn(delta));
+        main.post(() -> turn(delta));
     }
 
     private void turn(int delta) {
@@ -706,12 +751,30 @@ public final class ReaderActivity extends Activity {
         });
     }
 
-    private void snapshot() {
-        if (book == null || busy) return;
+    private void snapshot() { snapshot(false); }
+
+    /**
+     * Records the reading position. Writing the whole shelf on every page turn is wasteful on an
+     * e-reader, so routine saves are batched; leaving the page or the app saves at once.
+     */
+    private void snapshot(boolean now) {
+        if (book == null) {
+            if (now && saveScheduled) { saveScheduled = false; library.save(); }
+            return;
+        }
+        // While a chapter loads, the fields already name its target (page -1 is its last page),
+        // so leaving the book at that moment still records where the reader was heading.
+        if (busy && !now) return;
         put(book, "position", page); put(book, "chapter", chapter);
         put(book, "paragraph", paragraph); put(book, "offset", offset); put(book, "sample", sample);
         if (epub != null) put(book, "anchorPath", epub.chapters().get(chapter).path());
-        library.save();
+        long elapsed = android.os.SystemClock.elapsedRealtime() - lastSave;
+        if (now || elapsed >= 3000) {
+            saveScheduled = false; lastSave = android.os.SystemClock.elapsedRealtime(); library.save();
+        } else if (!saveScheduled) {
+            saveScheduled = true;
+            main.postDelayed(() -> { if (saveScheduled) snapshot(true); }, 3000 - elapsed);
+        }
     }
 
     private void refreshStatus() {
@@ -834,16 +897,46 @@ public final class ReaderActivity extends Activity {
     private void bookmark() {
         if (busy) return;
         var markers = bookmarkList();
+        if (pages != null) {
+            for (int i = 0; i < markers.length(); i++) {
+                var marker = markers.optJSONObject(i);
+                if (marker != null && marker.optInt("page") == page) { removeBookmark(markers, i); return; }
+            }
+            addBookmark(markers);
+            return;
+        }
+        // Page numbers move when the font size changes. Ask the page which saved anchors it holds.
+        var indexes = new ArrayList<Integer>();
+        var anchors = new JSONArray();
         for (int i = 0; i < markers.length(); i++) {
             var marker = markers.optJSONObject(i);
-            if (marker != null && marker.optInt("chapter") == chapter && marker.optInt("page") == page) {
-                markers.remove(i); library.save(); message("已移除本頁書籤"); return;
-            }
+            if (marker == null || marker.optInt("chapter") != chapter) continue;
+            try {
+                anchors.put(new JSONArray().put(marker.optInt("paragraph", -1)).put(marker.optDouble("offset", 0))
+                    .put(marker.optString("sample")));
+            } catch (JSONException invalid) { continue; }
+            indexes.add(i);
         }
+        if (indexes.isEmpty()) { addBookmark(markers); return; }
+        js("reader.onPage(" + anchors + ")", value -> {
+            int found;
+            try { found = Integer.parseInt(value); } catch (NumberFormatException e) { found = -1; }
+            if (found >= 0 && found < indexes.size()) removeBookmark(markers, indexes.get(found));
+            else addBookmark(markers);
+        });
+    }
+
+    private void removeBookmark(JSONArray markers, int index) {
+        synchronized (library) { markers.remove(index); }
+        library.save(); message("已移除本頁書籤");
+    }
+
+    private void addBookmark(JSONArray markers) {
         var marker = new JSONObject();
         put(marker, "chapter", chapter); put(marker, "page", page); put(marker, "paragraph", paragraph);
         put(marker, "offset", offset); put(marker, "sample", sample); put(marker, "label", book.optString("progress"));
-        markers.put(marker); library.save(); message("已加書籤");
+        synchronized (library) { markers.put(marker); }
+        library.save(); message("已加書籤");
     }
 
     private void markers() {
@@ -961,7 +1054,7 @@ public final class ReaderActivity extends Activity {
         }
     }
 
-    private void updateVoice() { getPreferences(0).edit().putBoolean("voice", voiceOn).apply(); syncVoice(); }
+    private void updateVoice() { syncVoice(); }
 
     private void syncVoice() {
         boolean wanted = book != null && active && voiceOn && checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
@@ -1077,9 +1170,10 @@ public final class ReaderActivity extends Activity {
     }
 
     private void closeBook() {
-        snapshot(); epoch++;
+        snapshot(true); epoch++;
         JSONObject closing = book;
         book = null; syncVoice();
+        main.removeCallbacksAndMessages(null);
         if (web != null) { web.stopLoading(); web.destroy(); web = null; }
         image = null;
         ZipFile z = zip; Pages p = pages;
