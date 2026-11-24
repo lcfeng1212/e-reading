@@ -183,4 +183,38 @@ public class OptimizeStressTest {
             }
         return null;
     }
+
+    @Test public void malformedTextConversionLeavesNoPartialEpub() throws Exception {
+        var file=temp(".txt"); var library=new Library(app); org.json.JSONObject book=null;
+        try {
+            Files.write(file.toPath(),new byte[]{0x61,(byte)0xc3,0x28});
+            book=library.add(Uri.fromFile(file),false,false);
+            try { library.epub(book,"UTF-8"); fail("Invalid UTF-8 was accepted"); }
+            catch (java.nio.charset.CharacterCodingException expected) {}
+            var folder = new File(app.getFilesDir(),"books");
+            String id=book.getString("id");
+            var files=folder.list((dir,name)->name.startsWith("conversion-") || name.startsWith(id));
+            assertNotNull(files);
+            for (String name:files)
+                assertFalse("Unexpected partial file " + name,name.endsWith(".tmp") || name.endsWith(".epub"));
+            log("Malformed UTF-8 rejected without a partial EPUB");
+        } finally { if (book!=null) library.remove(book); file.delete(); }
+    }
+
+    @Test public void invalidReplacementKeepsOriginalShelfRecord() throws Exception {
+        var file=temp(".txt"); var invalid=temp(".epub");
+        var library=new Library(app); org.json.JSONObject book=null;
+        try {
+            Files.write(file.toPath(),"first usable edition".getBytes(StandardCharsets.UTF_8));
+            Files.write(invalid.toPath(),"not an EPUB".getBytes(StandardCharsets.UTF_8));
+            book=library.add(Uri.fromFile(file),false,false);
+            int count=library.books().size();
+            try { library.replace(book,Uri.fromFile(invalid),true); fail("Invalid replacement was accepted"); }
+            catch (IOException expected) {}
+            assertEquals(count,library.books().size());
+            assertTrue(library.books().contains(book));
+            assertEquals("first usable edition",new String(Files.readAllBytes(library.source(book).toPath()),StandardCharsets.UTF_8));
+            log("Invalid EPUB replacement rolled back");
+        } finally { if (book!=null) library.remove(book);file.delete();invalid.delete(); }
+    }
 }
