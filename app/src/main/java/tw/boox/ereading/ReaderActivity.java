@@ -23,7 +23,8 @@ import java.util.function.Consumer;
 import java.util.zip.ZipFile;
 
 public final class ReaderActivity extends Activity {
-    private static final int PICK = 1, EXPORT = 2, RESTORE = 3, MIC = 4;
+    private static final int PICK = 1, EXPORT = 2, RESTORE = 3, MIC = 4, REPLACE = 5;
+    private JSONObject replacement;
     private static final String HOST = "reader.invalid";
     private final ExecutorService io = Executors.newSingleThreadExecutor();
     private Library library;
@@ -45,7 +46,7 @@ public final class ReaderActivity extends Activity {
     private boolean busy, toolbar, active, voiceOn, voiceRunning, operation, pendingRotate;
     private String voiceState = "";
     private float imageScale = 1, imageX, imageY, downX, downY;
-    private String linkFragment;
+    private String linkFragment, pendingSearch;
     private final LinkedHashMap<String, String> translations = new LinkedHashMap<>(32, .75f, true);
     private Translator translator;
 
@@ -199,7 +200,7 @@ public final class ReaderActivity extends Activity {
     }
 
     private void bookOptions(JSONObject entry) {
-        new AlertDialog.Builder(this).setTitle(entry.optString("title")).setItems(new String[]{"改名", "檔案資訊", "從書架移除"}, (d, i) -> {
+        new AlertDialog.Builder(this).setTitle(entry.optString("title")).setItems(new String[]{"改名", "檔案資訊", "替換書檔", "從書架移除"}, (d, i) -> {
             if (i == 0) {
                 var field = new EditText(this); field.setText(entry.optString("title"));
                 new AlertDialog.Builder(this).setTitle("改名").setView(field).setNegativeButton("取消", null)
@@ -211,6 +212,11 @@ public final class ReaderActivity extends Activity {
                 new AlertDialog.Builder(this).setTitle("檔案資訊")
                     .setMessage(entry.optString("format").toUpperCase(Locale.ROOT) + "\n" + (entry.optBoolean("local") ? "本機副本" : "本機原檔"))
                     .setPositiveButton("關閉", null).show();
+            } else if (i == 2) {
+                replacement = entry;
+                var intent = new Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE)
+                    .setType("*/*").addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+                startActivityForResult(intent, REPLACE);
             } else {
                 new AlertDialog.Builder(this).setTitle("從書架移除？").setMessage("原始檔仍會保留。")
                     .setNegativeButton("取消", null).setPositiveButton("移除", (a, b) -> { library.remove(entry); shelf(""); }).show();
@@ -228,6 +234,13 @@ public final class ReaderActivity extends Activity {
 
     @Override protected void onActivityResult(int request, int result, Intent data) {
         super.onActivityResult(request, result, data);
+        if (request == REPLACE) {
+            JSONObject previous = replacement;
+            replacement = null;
+            if (previous != null && result == RESULT_OK && data != null && data.getData() != null)
+                replaceBook(previous, data.getData());
+            return;
+        }
         if (result != RESULT_OK || data == null) return;
         if (request == PICK) {
             var all = new ArrayList<Uri>();
@@ -294,6 +307,29 @@ public final class ReaderActivity extends Activity {
         });
     }
 
+    private void replaceBook(JSONObject previous, Uri uri) {
+        new AlertDialog.Builder(this).setTitle("替換書檔")
+            .setItems(new String[]{"替換並保留閱讀位置", "替換並從頭閱讀"}, (dialog, choice) -> {
+                if (operation) return;
+                operation = true;
+                var wait = progress("正在讀取新版…");
+                io.execute(() -> {
+                    try {
+                        var next = library.replace(previous, uri, choice == 0);
+                        runOnUiThread(() -> {
+                            if (isDestroyed()) return;
+                            operation = false; wait.dismiss(); shelf(""); open(next, null);
+                        });
+                    } catch (Exception e) {
+                        runOnUiThread(() -> {
+                            if (isDestroyed()) return;
+                            operation = false; wait.dismiss(); error(e);
+                        });
+                    }
+                });
+            }).setNegativeButton("取消", null).show();
+    }
+
     private AlertDialog progress(String text) {
         return new AlertDialog.Builder(this).setMessage(text).setCancelable(false).show();
     }
@@ -317,6 +353,12 @@ public final class ReaderActivity extends Activity {
                     book = entry; zip = finalZip; epub = finalDescription; pages = finalPages;
                     page = Math.max(0, entry.optInt("position"));
                     chapter = epub == null ? 0 : Math.min(epub.chapters().size() - 1, Math.max(0, entry.optInt("chapter")));
+                    if (epub != null && entry.has("anchorPath")) {
+                        String anchorPath = entry.optString("anchorPath");
+                        for (int i = 0; i < epub.chapters().size(); i++) {
+                            if (epub.chapters().get(i).path().equals(anchorPath)) { chapter = i; break; }
+                        }
+                    }
                     paragraph = entry.optInt("paragraph", -1); offset = entry.optDouble("offset", 0); sample = entry.optString("sample");
                     if (encoding != null) put(entry, "encoding", encoding);
                     put(entry, "opened", System.currentTimeMillis());
@@ -510,6 +552,10 @@ public final class ReaderActivity extends Activity {
                     String next = linkFragment; linkFragment = null;
                     js("reader.chapterLink(" + JSONObject.quote(next) + ")", this::apply);
                 }
+                if (pendingSearch != null) {
+                    String query = pendingSearch; pendingSearch = null;
+                    js("reader.search(" + JSONObject.quote(query) + ")", this::apply);
+                }
                 if (pendingRotate) { pendingRotate = false; relayout(); }
             }));
     }
@@ -660,8 +706,16 @@ public final class ReaderActivity extends Activity {
 
     private void navigation() {
         if (busy) return;
-        new AlertDialog.Builder(this).setTitle("目錄／跳頁").setItems(new String[]{"目錄", "書籤", "跳頁", "搜尋本章"},
-            (d, i) -> { if (i == 0) contents(); else if (i == 1) markers(); else if (i == 2) jump(); else search(); }).show();
+        String[] items = epub != null ? new String[]{"目錄", "書籤", "跳頁", "搜尋本書"}
+            : new String[]{"書籤", "跳頁"};
+        new AlertDialog.Builder(this).setTitle("目錄／跳頁").setItems(items, (d, i) -> {
+            switch (items[i]) {
+                case "目錄" -> contents();
+                case "書籤" -> markers();
+                case "跳頁" -> jump();
+                default -> search();
+            }
+        }).show();
     }
 
     private void contents() {
@@ -696,16 +750,63 @@ public final class ReaderActivity extends Activity {
             }).show();
     }
 
+    private record SearchHit(int section, String label) {}
+
     private void search() {
-        if (web == null) { message("這個版面目前沒有書內搜尋"); return; }
+        if (web == null) return;
         var field = new EditText(this); field.setSingleLine(true);
-        new AlertDialog.Builder(this).setTitle("搜尋本章").setView(field).setNegativeButton("取消", null)
+        new AlertDialog.Builder(this).setTitle("搜尋本書").setView(field).setNegativeButton("取消", null)
             .setPositiveButton("搜尋", (d, i) -> {
-                String query = field.getText().toString().strip();
-                if (!query.isEmpty()) js("reader.search(" + JSONObject.quote(query) + ")", value -> {
-                    if ("null".equals(value)) message("本章找不到"); else apply(value);
-                });
+                String text = field.getText().toString().strip();
+                if (!text.isEmpty()) searchBook(text);
             }).show();
+    }
+
+    private void searchBook(String term) {
+        String needle = term.toLowerCase(Locale.ROOT);
+        String mode = book.optString("chinese", "original");
+        ZipFile archive = zip;
+        var chapters = epub.chapters();
+        int run = epoch;
+        var wait = progress("正在搜尋本書…");
+        io.execute(() -> {
+            try {
+                var hits = new ArrayList<SearchHit>();
+                for (int i = 0; i < chapters.size() && hits.size() < 100; i++) {
+                    var part = chapters.get(i);
+                    var entry = archive.getEntry(part.path());
+                    if (entry == null || entry.getSize() > 8 * 1024 * 1024) continue;
+                    String source;
+                    try (var in = archive.getInputStream(entry)) {
+                        byte[] bytes = in.readNBytes(8 * 1024 * 1024 + 1);
+                        if (bytes.length > 8 * 1024 * 1024) continue;
+                        source = new String(bytes, StandardCharsets.UTF_8);
+                    }
+                    source = source.replaceAll("(?is)<(?:head|script|style)\\b[^>]*>.*?</(?:head|script|style)>", "");
+                    String plain = android.text.Html.fromHtml(source, android.text.Html.FROM_HTML_MODE_LEGACY).toString();
+                    if (!mode.equals("original")) plain = chinese.convert(plain, mode);
+                    int found = plain.toLowerCase(Locale.ROOT).indexOf(needle);
+                    if (found < 0) continue;
+                    int start = Math.min(plain.length(), Math.max(0, found - 13));
+                    int end = Math.min(plain.length(), found + needle.length() + 24);
+                    String name = part.title() == null ? "第 " + (i + 1) + " 節" : part.title();
+                    hits.add(new SearchHit(i, name + "\n" + plain.substring(start, end).replaceAll("\\s+", " ")));
+                }
+                runOnUiThread(() -> {
+                    if (isDestroyed()) return;
+                    wait.dismiss();
+                    if (run != epoch) return;
+                    if (hits.isEmpty()) { message("本書找不到「" + term + "」"); return; }
+                    new AlertDialog.Builder(this).setTitle("搜尋結果")
+                        .setItems(hits.stream().map(SearchHit::label).toArray(String[]::new), (d, i) -> {
+                            pendingSearch = term;
+                            loadChapter(hits.get(i).section(), 0, -1, 0, "");
+                        }).show();
+                });
+            } catch (Exception e) {
+                runOnUiThread(() -> { if (!isDestroyed()) { wait.dismiss(); error(e); } });
+            }
+        });
     }
 
     private JSONArray bookmarkList() {
@@ -866,16 +967,39 @@ public final class ReaderActivity extends Activity {
         else if (pages != null && !selected) {
             Pages renderer = pages; int index = page;
             io.execute(() -> {
-                try { String text = renderer.text(index); runOnUiThread(() -> languagePrompt(text, run)); }
+                try { String text = renderer.text(index); runOnUiThread(() -> pdfTranslationOptions(text, run)); }
                 catch (Exception e) { runOnUiThread(() -> { if (run == epoch) error(e); }); }
             });
         }
     }
 
+    private void pdfTranslationOptions(String text, int run) {
+        if (run != epoch || book == null) return;
+        if (text.isBlank()) { message("找不到可翻譯的文字"); return; }
+        var field = new EditText(this);
+        field.setText(text);
+        field.setShowSoftInputOnFocus(false);
+        field.setInputType(android.text.InputType.TYPE_CLASS_TEXT | android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE);
+        field.setMaxLines(10);
+        field.setGravity(Gravity.TOP);
+        field.setTextIsSelectable(true);
+        field.setKeyListener(null);
+        new AlertDialog.Builder(this).setTitle("翻譯本頁或選取文字").setView(field)
+            .setNegativeButton("取消", null).setNeutralButton("翻譯選取", (dialog, which) -> {
+                int start = Math.min(field.getSelectionStart(), field.getSelectionEnd());
+                int end = Math.max(field.getSelectionStart(), field.getSelectionEnd());
+                if (start >= 0 && end > start) languagePrompt(text.substring(start, end), run);
+                else message("請先選取要翻譯的文字");
+            }).setPositiveButton("翻譯本頁", (dialog, which) -> languagePrompt(text, run)).show();
+    }
+
     private void languagePrompt(String text, int run) {
         if (run != epoch || book == null) return;
         if (text.isBlank()) { message("找不到可翻譯的文字"); return; }
-        new AlertDialog.Builder(this).setTitle("翻譯成繁體中文").setItems(new String[]{"英文 → 中文", "日文 → 中文"}, (d, i) -> {
+        int prior = book.optString("language").equals(TranslateLanguage.JAPANESE) ? 1 : 0;
+        new AlertDialog.Builder(this).setTitle("翻譯成繁體中文")
+            .setSingleChoiceItems(new String[]{"英文 → 中文", "日文 → 中文"}, prior, (d, i) -> {
+            d.dismiss();
             String language = i == 0 ? TranslateLanguage.ENGLISH : TranslateLanguage.JAPANESE;
             if (run != epoch || book == null) return;
             put(book, "language", language); library.save(); runTranslation(text, language);
@@ -929,12 +1053,11 @@ public final class ReaderActivity extends Activity {
 
     @Override public void onActionModeStarted(ActionMode mode) {
         super.onActionModeStarted(mode);
-        if (web == null || book == null) return;
+        if (book == null || web == null) return;
         mode.getMenu().add("翻譯").setOnMenuItemClickListener(item -> {
             translate(true);
             return true;
         });
-        mode.invalidate();
     }
 
     private void closeBook() {
@@ -948,7 +1071,7 @@ public final class ReaderActivity extends Activity {
             close(z); close(p);
             if (closing != null) library.clearCachedSource(closing);
         });
-        zip = null; pages = null; epub = null; busy = false; pendingRotate = false; linkFragment = null;
+        zip = null; pages = null; epub = null; busy = false; pendingRotate = false; linkFragment = null; pendingSearch = null;
     }
 
     private static void close(Closeable item) { if (item != null) try { item.close(); } catch (IOException ignored) {} }

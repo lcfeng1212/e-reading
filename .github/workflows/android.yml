@@ -32,9 +32,11 @@ jobs:
           curl --fail --location --retry 3 https://codeload.github.com/BYVoid/OpenCC/tar.gz/refs/tags/ver.1.1.9 -o /tmp/opencc.tar.gz
           mkdir -p /tmp/opencc app/src/main/assets/opencc
           tar -xzf /tmp/opencc.tar.gz -C /tmp/opencc --strip-components=1
-          for name in STPhrases STCharacters TSPhrases TSCharacters TWPhrases TWVariants; do
+          for name in STPhrases STCharacters TSPhrases TSCharacters TWVariants; do
             cp "/tmp/opencc/data/dictionary/$name.txt" app/src/main/assets/opencc/
           done
+          cat /tmp/opencc/data/dictionary/TWPhrases*.txt > app/src/main/assets/opencc/TWPhrases.txt
+          test -s app/src/main/assets/opencc/TWPhrases.txt
           cp /tmp/opencc/LICENSE app/src/main/assets/opencc/
       - run: gradle :app:assembleDebug
       - uses: actions/upload-artifact@v4

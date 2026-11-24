@@ -74,6 +74,37 @@ final class Library {
         } finally { if (temp != null) temp.delete(); }
     }
 
+    synchronized JSONObject replace(JSONObject old, Uri uri, boolean continueReading) throws Exception {
+        var previous = new JSONObject(old.toString());
+        var existing = new ArrayList<>(entries);
+        var next = add(uri, false, false);
+        try {
+            String format = next.optString("format");
+            if (format.equals("pdf") || format.equals("cbz")) {
+                try (var pages = new Pages(source(next), format.equals("pdf"))) {
+                    if (pages.count() < 1) throw new IOException("檔案沒有可讀頁面");
+                }
+            } else try (var archive = new java.util.zip.ZipFile(epub(next, null))) {
+                Books.epub(archive);
+            }
+        } catch (Exception failure) {
+            if (!existing.contains(next)) remove(next);
+            throw failure;
+        }
+        for (String key : List.of("size", "chinese", "night", "hand", "rtl", "language", "font",
+            "spacing", "fit", "rotation")) {
+            if (previous.has(key)) next.put(key, previous.get(key));
+        }
+        for (String key : List.of("chapter", "position", "paragraph", "offset", "sample", "anchorPath")) {
+            if (continueReading && previous.has(key)) next.put(key, previous.get(key));
+            else next.remove(key);
+        }
+        // A new edition can move bookmarks. Keep them only when the file identity still matches.
+        if (!old.optString("id").equals(next.optString("id"))) remove(old);
+        save();
+        return next;
+    }
+
     File source(JSONObject book) throws IOException {
         File target = new File(folder, book.optString("id"));
         if (target.isFile()) return target;
