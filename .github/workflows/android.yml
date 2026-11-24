@@ -17,7 +17,9 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
-      - run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools platforms;android-35 build-tools;35.0.0'
       - name: Prepare offline Chinese voice model
         run: |
           curl --fail --location --retry 3 https://alphacephei.com/vosk/models/vosk-model-small-cn-0.22.zip -o /tmp/boox-model.zip
