@@ -31,10 +31,32 @@ final class Books {
             var match = new CharsetDetector().setText(prefix).detect();
             if (match != null && match.getConfidence() >= 40
                 && (match.getName().equalsIgnoreCase("Big5") || match.getName().equalsIgnoreCase("GB18030"))) {
-                return Charset.forName(match.getName());
+                return named(match.getName());
             }
             throw new CharacterCodingException();
         }
+    }
+
+    /**
+     * Taiwanese TXT files labelled Big5 are usually Windows code page 950, which adds common
+     * characters such as 碁、銹、裏、墻、恒 and the euro sign. Strict Big5 rejects the whole file.
+     */
+    static Charset named(String name) {
+        if (name.equalsIgnoreCase("Big5")) {
+            for (String candidate : new String[]{"x-windows-950", "windows-950"}) {
+                try { if (Charset.isSupported(candidate)) return Charset.forName(candidate); }
+                catch (IllegalCharsetNameException ignored) {}
+            }
+        }
+        return Charset.forName(name);
+    }
+
+    /** A chapter title is short and does not end like a sentence, e.g. 「第一回合比賽開始了。」. */
+    static boolean heading(String line) {
+        if (line.isEmpty() || line.length() > 40) return false;
+        char last = line.charAt(line.length() - 1);
+        if ("。，、；,;".indexOf(last) >= 0) return false;
+        return HEADING.matcher(line).matches();
     }
 
     static void txt(File raw, File dest, String title, Charset encoding) throws IOException {
@@ -58,7 +80,7 @@ final class Books {
                 afterCr = c == '\r';
                 if (c == '\r' || c == '\n') {
                     String str = line.toString();
-                    if (!lineSplit && str.strip().length() <= 64 && HEADING.matcher(str.strip()).matches()) {
+                    if (!lineSplit && heading(str.strip())) {
                         if (html.length() > 0) epub.chapter(html.toString(), heading, toc);
                         html.setLength(0);
                         heading = str.strip();

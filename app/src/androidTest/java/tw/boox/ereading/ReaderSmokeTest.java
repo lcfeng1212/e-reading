@@ -47,6 +47,35 @@ public final class ReaderSmokeTest {
         } finally { original.delete(); converted.delete(); }
     }
 
+    @Test public void convertBig5WithCodePage950Characters() throws Exception {
+        var original = temp(".txt");
+        var converted = temp(".epub");
+        try {
+            String input = "第1章 測試\n碁銹裏墻恒粧嫺，一般文字顯示正常。\n";
+            Files.write(original.toPath(), input.getBytes("x-windows-950"));
+            Books.txt(original, converted, "Big5", Books.named("Big5"));
+            try (var zip = new ZipFile(converted)) {
+                var book = Books.epub(zip);
+                String html = new String(zip.getInputStream(zip.getEntry(book.chapters().get(0).path())).readAllBytes(),
+                    StandardCharsets.UTF_8);
+                assertTrue(html.contains("碁銹裏墻恒粧嫺"));
+            }
+        } finally { original.delete(); converted.delete(); }
+    }
+
+    @Test public void sentencesAreNotChapterTitles() {
+        assertTrue(Books.heading("第十章 真正的章名"));
+        assertTrue(Books.heading("第一回 風起"));
+        assertFalse(Books.heading("第一回合比賽開始了。"));
+        assertFalse(Books.heading("第三部分的內容如下。"));
+        assertFalse(Books.heading("序章後面接著很長的一句敘述文字，這不是章名而是正文的一部分，長度超過四十字唷。"));
+    }
+
+    @Test public void convertPhrasesStartingWithLatinLetters() throws Exception {
+        var app = InstrumentationRegistry.getInstrumentation().getTargetContext();
+        assertEquals("隨身碟", new Chinese(app).convert("U盘", "tw"));
+    }
+
     @Test public void readPdfAndComicPages() throws Exception {
         var pdf = temp(".pdf");
         var cbz = temp(".cbz");

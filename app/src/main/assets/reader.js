@@ -31,25 +31,73 @@
     range.setEnd(node, Math.min(node.length, at + 1));
     return range.getBoundingClientRect();
   }
+  // A line-end full-width space or punctuation can hang past its column into the next page.
+  // The centre of a glyph decides which page owns it.
+  function centre(rect) { return (rect.left + rect.right) / 2; }
+  // Trailing spaces, including the full-width U+3000 indent, hang past the column edge.
+  // Measure them by the nearest preceding glyph so they stay on that glyph's page.
+  function glyph(node, offset) {
+    const text = node.nodeValue;
+    let at = Math.min(Math.max(0, offset), node.length - 1);
+    for (let k = at; k > 0 && k > at - 16 && /[\s\u3000]/.test(text[k]); k--) if (!/[\s\u3000]/.test(text[k - 1])) { at = k - 1; break; }
+    return rangeOf(node, at);
+  }
   function visible(rect) {
-    return rect.width > 0 && rect.height > 0 && rect.right > 2 && rect.left < width() - 2
+    const x = centre(rect);
+    return rect.width > 0 && rect.height > 0 && x > 0 && x < width()
       && rect.bottom > 0 && rect.top < innerHeight;
+  }
+  // Pages advance in document order, so earlier text lies entirely before the viewport.
+  // Binary searches keep a page turn fast even when one paragraph spans many pages.
+  function before(rect) { return rtl ? centre(rect) >= width() : centre(rect) <= 0; }
+  function after(rect) { return rtl ? centre(rect) <= 0 : centre(rect) >= width(); }
+  function rects(node) {
+    const block = new Range();
+    block.selectNodeContents(node);
+    return Array.from(block.getClientRects()).filter(rect => rect.width > 0 && rect.height > 0);
+  }
+  function nodeBefore(index) {
+    const list = rects(nodes[index].node);
+    return !list.length || list.every(before);
+  }
+  function nodeVisible(index) { return nodes[index].node.length > 0 && rects(nodes[index].node).some(visible); }
+  function firstNode() {
+    let low = 0, high = nodes.length;
+    while (low < high) {
+      const middle = (low + high) >> 1;
+      if (nodeBefore(middle)) low = middle + 1; else high = middle;
+    }
+    for (let i = low; i < Math.min(nodes.length, low + 64); i++) if (nodeVisible(i)) return i;
+    for (let i = 0; i < nodes.length; i++) if (nodeVisible(i)) return i;
+    return -1;
+  }
+  function firstChar(node) {
+    let low = 0, high = node.length;
+    while (low < high) {
+      const middle = (low + high) >> 1;
+      if (before(glyph(node, middle))) low = middle + 1; else high = middle;
+    }
+    for (let j = low; j < Math.min(node.length, low + 64); j++) if (visible(glyph(node, j))) return j;
+    for (let j = 0; j < node.length; j++) if (visible(glyph(node, j))) return j;
+    return 0;
+  }
+  function endChar(node, start) {
+    let low = start, high = node.length;
+    while (low < high) {
+      const middle = (low + high) >> 1;
+      if (after(glyph(node, middle))) high = middle; else low = middle + 1;
+    }
+    return low;
   }
   function state() {
     let index = -1, ratio = 0, sample = '';
-    if (!fixed) for (let i = 0; i < nodes.length; i++) {
-      const {node, text} = nodes[i];
-      if (!node.length) continue;
-      const block = new Range();
-      block.selectNodeContents(node);
-      if (!Array.from(block.getClientRects()).some(visible)) continue;
-      index = i;
-      for (let j = 0; j < node.length; j++) if (visible(rangeOf(node, j))) {
-        ratio = j / node.length;
-        break;
+    if (!fixed) {
+      index = firstNode();
+      if (index >= 0) {
+        const {node, text} = nodes[index];
+        ratio = firstChar(node) / node.length;
+        sample = text.trim().slice(0, 72);
       }
-      sample = text.trim().slice(0, 72);
-      break;
     }
     return {page: position, total: total(), paragraph: index, offset: ratio, sample};
   }
@@ -90,9 +138,10 @@
     if (sample && (!entry || !entry.text.trim().startsWith(sample)))
       entry = nodes.find(item => item.text.trim().startsWith(sample)) || entry;
     if (entry && entry.node.length) {
-      const rect = rangeOf(entry.node, Math.floor(entry.node.length * offset));
+      // Round, not floor: the stored ratio can land a hair below the first visible character.
+      const rect = glyph(entry.node, Math.min(entry.node.length - 1, Math.round(entry.node.length * offset)));
       if (rect.width > 0) {
-        const absolute = rtl ? position * width() + width() - rect.right : rect.left + position * width();
+        const absolute = rtl ? position * width() + width() - centre(rect) : centre(rect) + position * width();
         return go(Math.floor(Math.max(0, absolute) / width()));
       }
     }
@@ -101,18 +150,18 @@
   function visibleText() {
     if (fixed) return body.innerText || '';
     const result = [];
-    for (const {node} of nodes) {
+    const start = firstNode();
+    if (start < 0) return '';
+    for (let i = start; i < nodes.length; i++) {
+      const {node} = nodes[i];
       if (!node.length) continue;
-      const range = new Range();
-      range.selectNodeContents(node);
-      const rects = Array.from(range.getClientRects());
-      if (!rects.some(visible)) continue;
-      if (rects.every(visible)) result.push(node.nodeValue);
-      else {
-        let text = '';
-        for (let i = 0; i < node.length; i++) if (visible(rangeOf(node, i))) text += node.nodeValue[i];
-        if (text) result.push(text);
-      }
+      const list = rects(node);
+      if (list.length && list.every(after)) break;
+      if (!list.some(visible)) continue;
+      if (list.every(visible)) { result.push(node.nodeValue); continue; }
+      const from = firstChar(node);
+      const text = node.nodeValue.slice(from, endChar(node, from));
+      if (text) result.push(text);
     }
     return result.join('\n');
   }
