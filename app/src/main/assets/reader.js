@@ -144,6 +144,12 @@
     const absolute = rtl ? position * width() + width() - centre(rect) : centre(rect) + position * width();
     return Math.floor(Math.max(0, absolute) / width());
   }
+  function pageOfOffset(node, offset) {
+    const rect = glyph(node, offset);
+    if (rect.width <= 0) return position;
+    const absolute = rtl ? position * width() + width() - centre(rect) : centre(rect) + position * width();
+    return Math.floor(Math.max(0, absolute) / width());
+  }
   function locate(page, paragraph, offset, sample) {
     if (fixed) return go(0);
     const found = pageOf(paragraph, offset, sample);
@@ -182,13 +188,29 @@
     visibleText,
     selected: () => window.getSelection()?.toString() || '',
     selectionClear: () => window.getSelection()?.removeAllRanges(),
+    // Searches the chapter's text as one string, so a match split across tags (e.g. bold text
+    // inside a sentence) is still found. Returns null when the chapter does not contain it.
     search: word => {
       const query = word.toLocaleLowerCase();
-      const index = nodes.findIndex(item => item.node.nodeValue.toLocaleLowerCase().includes(query));
-      if (index < 0) return null;
-      const offset = nodes[index].node.nodeValue.toLocaleLowerCase().indexOf(query) / nodes[index].node.length;
-      return locate(position, index, offset, '');
+      if (!query) return null;
+      let joined = '';
+      const starts = [];
+      for (const item of nodes) { starts.push(joined.length); joined += item.node.nodeValue; }
+      const at = joined.toLocaleLowerCase().indexOf(query);
+      if (at < 0) return null;
+      let index = 0;
+      while (index + 1 < nodes.length && starts[index + 1] <= at) index++;
+      const node = nodes[index].node;
+      return go(pageOfOffset(node, at - starts[index]));
     },
+    // The link under a tap at view pixel (x, y): its absolute address, or null.
+    linkAt: (x, y) => {
+      const ratio = window.devicePixelRatio || 1;
+      const element = document.elementFromPoint(x / ratio, y / ratio);
+      const link = element && element.closest('a[href]');
+      return link ? link.href : null;
+    },
+    goFraction: fraction => go(Math.floor(Math.max(0, Math.min(0.999, fraction)) * total())),
     chapterLink: fragment => {
       const target = document.getElementById(fragment);
       if (!target || fixed) return state();

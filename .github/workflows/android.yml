@@ -43,8 +43,8 @@ jobs:
           # A fixed key lets each new APK install over the previous one, keeping the shelf.
           # Without the secret, each run signs with a new key and updates need a reinstall.
           if [ -n "$DEBUG_KEYSTORE" ]; then
-            mkdir -p ~/.android
-            echo "$DEBUG_KEYSTORE" | base64 -d > ~/.android/debug.keystore
+            echo "$DEBUG_KEYSTORE" | base64 -d > "$RUNNER_TEMP/e-reading.keystore"
+            echo "SIGNING_KEYSTORE=$RUNNER_TEMP/e-reading.keystore" >> "$GITHUB_ENV"
             echo "Signing with the project key"
           else
             echo "::warning::DEBUG_KEYSTORE secret not set; this APK cannot update an earlier install"
@@ -76,6 +76,14 @@ jobs:
           name="e-reading-v$version"
           cp app/build/outputs/apk/debug/app-arm64-v8a-debug.apk "$name.apk"
           echo "name=$name" >> "$GITHUB_OUTPUT"
+      - name: Check the APK is signed with the project key
+        run: |
+          certificate=$("$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --print-certs "${{ steps.apk.outputs.name }}.apk")
+          echo "$certificate" | grep -E 'Signer #1 certificate (DN|SHA-256)'
+          if [ -n "$SIGNING_KEYSTORE" ] && ! echo "$certificate" | grep -q 'CN=e-reading'; then
+            echo "::error::The APK is not signed with the project key, so it would not update an earlier install"
+            exit 1
+          fi
       - name: Report APK size by part
         run: |
           python3 - "${{ steps.apk.outputs.name }}.apk" <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"

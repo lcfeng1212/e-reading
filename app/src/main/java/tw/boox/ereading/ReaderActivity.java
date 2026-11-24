@@ -55,6 +55,7 @@ public final class ReaderActivity extends Activity {
     private String voiceState = "";
     private float imageScale = 1, imageX, imageY, downX, downY;
     private String linkFragment, pendingSearch;
+    private double pendingFraction = -1;
     private final LinkedHashMap<String, String> translations = new LinkedHashMap<>(32, .75f, true);
     private Translator translator;
 
@@ -603,7 +604,14 @@ public final class ReaderActivity extends Activity {
                 }
                 if (pendingSearch != null) {
                     String query = pendingSearch; pendingSearch = null;
-                    js("reader.search(" + JSONObject.quote(query) + ")", this::apply);
+                    js("reader.search(" + JSONObject.quote(query) + ")", found -> {
+                        if ("null".equals(found)) message("找不到「" + query + "」在本章的確切位置，已停在章首");
+                        else apply(found);
+                    });
+                }
+                if (pendingFraction >= 0) {
+                    double fraction = pendingFraction; pendingFraction = -1;
+                    js("reader.goFraction(" + fraction + ")", this::apply);
                 }
                 if (pendingRotate) { pendingRotate = false; relayout(); }
             }));
@@ -708,20 +716,26 @@ public final class ReaderActivity extends Activity {
         if (Math.abs(delta) > dp(48)) { turn((delta < 0 ? 1 : -1) * (rtl ? -1 : 1)); return true; }
         if (Math.abs(delta) > dp(18) || Math.abs(event.getY() - downY) > dp(18)) return view == image;
         float x = event.getX() / Math.max(1, view.getWidth());
-        if (x > .27f && x < .73f) toggleToolbar();
-        else {
-            String hand = book.optString("hand");
-            int next = (x > .5 ? 1 : -1) * (rtl ? -1 : 1);
-            if (hand.equals("left")) next = x < .5 ? 1 : -1;
-            if (hand.equals("right")) next = x > .5 ? 1 : -1;
-            turn(next);
-        }
+        Runnable tap = () -> {
+            if (book == null) return;
+            if (x > .27f && x < .73f) toggleToolbar();
+            else {
+                String hand = book.optString("hand");
+                int next = (x > .5 ? 1 : -1) * (rtl ? -1 : 1);
+                if (hand.equals("left")) next = x < .5 ? 1 : -1;
+                if (hand.equals("right")) next = x > .5 ? 1 : -1;
+                turn(next);
+            }
+        };
         if (web != null) {
+            // The page never receives taps (they turn pages), so links such as footnotes are
+            // followed here: ask the page whether a link lies under the finger first.
             MotionEvent cancel = MotionEvent.obtain(event);
             cancel.setAction(MotionEvent.ACTION_CANCEL);
             web.onTouchEvent(cancel);
             cancel.recycle();
-        }
+            js("reader.linkAt(" + event.getX() + "," + event.getY() + ")", value -> { if (!followLink(value)) tap.run(); });
+        } else tap.run();
         return true;
     }
 
@@ -731,6 +745,27 @@ public final class ReaderActivity extends Activity {
         int delta = queuedTurn;
         queuedTurn = 0;
         main.post(() -> turn(delta));
+    }
+
+    /** Opens a link inside the book. Returns false when there is no link to follow. */
+    private boolean followLink(String value) {
+        if (value == null || value.equals("null") || epub == null) return false;
+        Uri uri;
+        try { uri = Uri.parse(new JSONArray("[" + value + "]").getString(0)); }
+        catch (JSONException e) { return false; }
+        if (!HOST.equals(uri.getHost()) || uri.getPath() == null) return false;
+        for (int i = 0; i < epub.chapters().size(); i++) {
+            if (!("/" + epub.chapters().get(i).path()).equals(uri.getPath())) continue;
+            if (busy) return true;
+            if (i == chapter) {
+                if (uri.getFragment() != null) js("reader.chapterLink(" + JSONObject.quote(uri.getFragment()) + ")", this::apply);
+            } else {
+                linkFragment = uri.getFragment();
+                loadChapter(i, 0, -1, 0, "");
+            }
+            return true;
+        }
+        return false;
     }
 
     private void turn(int delta) {
@@ -822,8 +857,13 @@ public final class ReaderActivity extends Activity {
                     target = Math.max(1, Math.min(target, max));
                     if (pages != null) { page = target - 1; renderImage(); }
                     else {
-                        int part = Math.min(epub.chapters().size() - 1, (int)(target / 100d * epub.chapters().size()));
-                        loadChapter(part, target == 100 ? -1 : 0, -1, 0, "");
+                        // Use chapter sizes, the same measure as the percentage on screen.
+                        double wanted = target / 100d * weights[weights.length - 1];
+                        int part = 0;
+                        while (part < epub.chapters().size() - 1 && weights[part + 1] <= wanted) part++;
+                        long span = Math.max(1, weights[part + 1] - weights[part]);
+                        pendingFraction = target == 100 ? 0.999 : (wanted - weights[part]) / span;
+                        loadChapter(part, 0, -1, 0, "");
                     }
                 } catch (NumberFormatException ignored) {}
             }).show();
@@ -1222,7 +1262,7 @@ public final class ReaderActivity extends Activity {
             close(z); close(p);
             if (closing != null) library.clearCachedSource(closing);
         });
-        zip = null; pages = null; epub = null; busy = false; queuedTurn = 0; pendingRotate = false; linkFragment = null; pendingSearch = null;
+        zip = null; pages = null; epub = null; busy = false; queuedTurn = 0; pendingRotate = false; linkFragment = null; pendingSearch = null; pendingFraction = -1;
     }
 
     private static void close(Closeable item) { if (item != null) try { item.close(); } catch (IOException ignored) {} }
