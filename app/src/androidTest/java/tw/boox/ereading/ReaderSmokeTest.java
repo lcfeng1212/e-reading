@@ -113,4 +113,70 @@ public final class ReaderSmokeTest {
         assertEquals("简体中文", new Chinese(app).convert("簡體中文", "cn"));
         instrumentation.runOnMainSync(activity::finish);
     }
+
+    @Test public void openImportedTxtAndContinueToNextPage() throws Exception {
+        var instrumentation = InstrumentationRegistry.getInstrumentation();
+        var app = instrumentation.getTargetContext();
+        var resolver = app.getContentResolver();
+        var values = new android.content.ContentValues();
+        values.put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME,
+            "boox-reader-smoke-" + java.util.UUID.randomUUID() + ".txt");
+        values.put(android.provider.MediaStore.MediaColumns.MIME_TYPE, "text/plain");
+        var uri = resolver.insert(android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI, values);
+        assertNotNull(uri);
+        ReaderActivity activity = null;
+        try {
+            try (var output = resolver.openOutputStream(uri)) {
+                assertNotNull(output);
+                output.write(("第1章 測試\n" + "測試文字依照順序顯示。".repeat(120) + "\n").getBytes(StandardCharsets.UTF_8));
+            }
+            var launch = new Intent(Intent.ACTION_VIEW, uri).setClass(app, ReaderActivity.class)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            activity = (ReaderActivity) instrumentation.startActivitySync(launch);
+            ReaderActivity reader = activity;
+            android.webkit.WebView web = null;
+            long deadline = android.os.SystemClock.elapsedRealtime() + 25_000;
+            while (android.os.SystemClock.elapsedRealtime() < deadline) {
+                var candidate = new java.util.concurrent.atomic.AtomicReference<android.webkit.WebView>();
+                instrumentation.runOnMainSync(() -> candidate.set(findWeb(reader.findViewById(android.R.id.content))));
+                web = candidate.get();
+                if (web != null && !readState(instrumentation, web).equals("null")) break;
+                Thread.sleep(200);
+            }
+            assertNotNull("Opening TXT should display a reader", web);
+            String before = readState(instrumentation, web);
+            assertNotEquals("The EPUB renderer should initialize", "null", before);
+            assertEquals(0, new org.json.JSONObject(before).getInt("page"));
+            assertTrue("The test book needs more than one page", new org.json.JSONObject(before).getInt("total") > 1);
+            instrumentation.runOnMainSync(() -> reader.dispatchKeyEvent(new android.view.KeyEvent(
+                android.view.KeyEvent.ACTION_DOWN, android.view.KeyEvent.KEYCODE_PAGE_DOWN)));
+            int current = 0;
+            for (int i = 0; i < 15 && current == 0; i++) {
+                current = new org.json.JSONObject(readState(instrumentation, web)).getInt("page");
+                if (current == 0) Thread.sleep(100);
+            }
+            assertEquals("One key press should go forward one page", 1, current);
+        } finally {
+            if (activity != null) instrumentation.runOnMainSync(activity::finish);
+            resolver.delete(uri, null, null);
+        }
+    }
+
+    private android.webkit.WebView findWeb(android.view.View view) {
+        if (view instanceof android.webkit.WebView web) return web;
+        if (view instanceof android.view.ViewGroup parent) {
+            for (int i = 0; i < parent.getChildCount(); i++) {
+                var found = findWeb(parent.getChildAt(i));
+                if (found != null) return found;
+            }
+        }
+        return null;
+    }
+
+    private String readState(android.app.Instrumentation target, android.webkit.WebView web) throws Exception {
+        var result = new java.util.concurrent.CompletableFuture<String>();
+        target.runOnMainSync(() -> web.evaluateJavascript(
+            "window.reader ? window.reader.state() : null", result::complete));
+        return result.get(5, java.util.concurrent.TimeUnit.SECONDS);
+    }
 }

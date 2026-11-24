@@ -242,10 +242,10 @@ final class Books {
             }
             entry("OEBPS/nav.xhtml", page("目錄", "<nav epub:type=\"toc\"><ol>"
                 + String.join("", contents) + "</ol></nav>"));
-            entry("OEBPS/book.opf", """
+            entry("OEBPS/book.opf", String.format(Locale.ROOT, """
                 <?xml version="1.0" encoding="UTF-8"?>
                 <package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="id"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:identifier id="id">urn:uuid:%s</dc:identifier><dc:title>%s</dc:title><dc:language>zh</dc:language><meta property="dcterms:modified">%s</meta></metadata><manifest><item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>%s</manifest><spine>%s</spine></package>
-                """.formatted(UUID.randomUUID(), escape(title), java.time.Instant.now().truncatedTo(java.time.temporal.ChronoUnit.SECONDS), items, spine));
+                """, UUID.randomUUID(), escape(title), java.time.Instant.now().truncatedTo(java.time.temporal.ChronoUnit.SECONDS), items, spine));
         }
 
         private String page(String title, String body) {
