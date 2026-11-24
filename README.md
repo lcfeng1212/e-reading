@@ -1,4 +1,4 @@
-# BOOX Go 7 語音閱讀器
+# e-reading v0.1.0
 
 Android 13 / BOOX Go 7 開發預覽。書架右上角「＋」可選本機書檔與 Android 選檔器提供的 Google 雲端硬碟來源。可選一本直接開書，或多選加入書架。
 
@@ -10,7 +10,7 @@ Android 13 / BOOX Go 7 開發預覽。書架右上角「＋」可選本機書檔
 
 ## 編譯與下載
 
-[GitHub Actions](https://github.com/lcfeng1212/e-reading/actions/workflows/android.yml) 會安裝 Android SDK、取得離線模型與繁簡字典、編譯 APK。到成功的執行紀錄下載 `BOOX-Go7-e-reading`，解壓後安裝 `app-debug.apk`。APK 為開發測試版。
+[GitHub Actions](https://github.com/lcfeng1212/e-reading/actions/workflows/android.yml) 會安裝 Android SDK、取得離線模型與繁簡字典、編譯 APK。到成功的執行紀錄下載 `e-reading-v0.1.0`，解壓後安裝 `e-reading-v0.1.0.apk`。APK 為開發測試版。
 
 ## MOBI 元件
 
