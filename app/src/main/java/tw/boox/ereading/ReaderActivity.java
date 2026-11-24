@@ -62,7 +62,10 @@ public final class ReaderActivity extends Activity {
         library = new Library(this);
         chinese = new Chinese(this);
         PDFBoxResourceLoader.init(getApplicationContext());
-        voiceOn = getPreferences(0).getBoolean("voice", false);
+        // Voice page turning starts off every time the app starts. It stays on through a lock
+        // screen or a trip to the shelf until the app is closed.
+        voiceOn = false;
+        getPreferences(0).edit().remove("voice").apply();
         voice = new Voice(this, new Voice.Listener() {
             @Override public void page(int delta) { runOnUiThread(() -> { if (voiceRunning && active) turn(delta); }); }
             @Override public void state(String text) { runOnUiThread(() -> { if (voiceRunning) { voiceState = text; refreshStatus(); } }); }
@@ -994,7 +997,7 @@ public final class ReaderActivity extends Activity {
         }
     }
 
-    private void updateVoice() { getPreferences(0).edit().putBoolean("voice", voiceOn).apply(); syncVoice(); }
+    private void updateVoice() { syncVoice(); }
 
     private void syncVoice() {
         boolean wanted = book != null && active && voiceOn && checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
