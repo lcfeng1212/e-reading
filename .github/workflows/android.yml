@@ -1,0 +1,42 @@
+name: Android APK
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+      - name: Prepare offline Chinese voice model
+        run: |
+          curl --fail --location --retry 3 https://alphacephei.com/vosk/models/vosk-model-small-cn-0.22.zip -o /tmp/boox-model.zip
+          unzip -q /tmp/boox-model.zip -d /tmp/boox-voice
+          mkdir -p app/src/main/assets
+          mv /tmp/boox-voice/vosk-model-small-cn-0.22 app/src/main/assets/model-cn
+          test -s app/src/main/assets/model-cn/am/final.mdl
+      - name: Prepare Chinese conversion dictionaries
+        run: |
+          curl --fail --location --retry 3 https://codeload.github.com/BYVoid/OpenCC/tar.gz/refs/tags/ver.1.1.9 -o /tmp/opencc.tar.gz
+          mkdir -p /tmp/opencc app/src/main/assets/opencc
+          tar -xzf /tmp/opencc.tar.gz -C /tmp/opencc --strip-components=1
+          for name in STPhrases STCharacters TSPhrases TSCharacters TWPhrases TWVariants; do
+            cp "/tmp/opencc/data/dictionary/$name.txt" app/src/main/assets/opencc/
+          done
+          cp /tmp/opencc/LICENSE app/src/main/assets/opencc/
+      - run: gradle :app:assembleDebug
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BOOX-Go7-e-reading
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error

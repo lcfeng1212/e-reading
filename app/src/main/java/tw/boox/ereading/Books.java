@@ -1,0 +1,356 @@
+package tw.boox.ereading;
+
+import android.icu.text.CharsetDetector;
+import android.text.TextUtils;
+import android.util.Xml;
+import org.xmlpull.v1.XmlPullParser;
+import java.io.*;
+import java.net.URI;
+import java.nio.charset.*;
+import java.nio.file.*;
+import java.util.*;
+import java.util.regex.Pattern;
+import java.util.zip.*;
+
+final class Books {
+    private static final int CHUNK = 48_000;
+    private static final Pattern HEADING = Pattern.compile(
+        "(?iu)^(?:第[0-9０-９零〇一二三四五六七八九十百千万萬兩两]+[章回節节卷集部篇].*|(?:序章|楔子|引子|前言|尾聲|尾声|後記|后记|番外|終章|终章).*|Chapter\\s+[0-9０-９]+.*)$");
+
+    record Chapter(String path, String title) {}
+    record Epub(List<Chapter> chapters, boolean fixed, boolean rtl) {}
+
+    static Charset charset(File file) throws IOException {
+        try (var in = new FileInputStream(file)) {
+            byte[] prefix = in.readNBytes(64 * 1024);
+            if (prefix.length >= 2 && (prefix[0] == (byte) 255 && prefix[1] == (byte) 254
+                || prefix[0] == (byte) 254 && prefix[1] == (byte) 255)) return StandardCharsets.UTF_16;
+            var input = java.nio.ByteBuffer.wrap(prefix);
+            var decoder = StandardCharsets.UTF_8.newDecoder();
+            var check = decoder.decode(input, java.nio.CharBuffer.allocate(prefix.length), false);
+            if (!check.isError()) return StandardCharsets.UTF_8;
+            var match = new CharsetDetector().setText(prefix).detect();
+            if (match != null && match.getConfidence() >= 40
+                && (match.getName().equalsIgnoreCase("Big5") || match.getName().equalsIgnoreCase("GB18030"))) {
+                return Charset.forName(match.getName());
+            }
+            throw new CharacterCodingException();
+        }
+    }
+
+    static void txt(File raw, File dest, String title, Charset encoding) throws IOException {
+        var decoder = encoding.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
+            .onUnmappableCharacter(CodingErrorAction.REPORT);
+        try (var text = new BufferedReader(new InputStreamReader(new FileInputStream(raw), decoder));
+             var epub = new EpubOutput(dest, title)) {
+            var html = new StringBuilder();
+            String heading = "正文";
+            boolean toc = true;
+            int value;
+            var line = new StringBuilder();
+            boolean lineSplit = false;
+            boolean afterCr = false;
+            boolean first = true;
+            while ((value = text.read()) != -1) {
+                char c = (char) value;
+                if (first && c == '\uFEFF') { first = false; continue; }
+                first = false;
+                if (afterCr && c == '\n') { afterCr = false; continue; }
+                afterCr = c == '\r';
+                if (c == '\r' || c == '\n') {
+                    String str = line.toString();
+                    if (!lineSplit && str.strip().length() <= 64 && HEADING.matcher(str.strip()).matches()) {
+                        if (html.length() > 0) epub.chapter(html.toString(), heading, toc);
+                        html.setLength(0);
+                        heading = str.strip();
+                        toc = true;
+                    }
+                    String part = "<p>" + escape(str) + "</p>\n";
+                    if (html.length() + part.length() > CHUNK && html.length() > 0) {
+                        epub.chapter(html.toString(), heading, toc);
+                        html.setLength(0);
+                        toc = false;
+                    }
+                    html.append(part);
+                    line.setLength(0);
+                    lineSplit = false;
+                } else {
+                    line.append(c);
+                    if (line.length() >= 6_000 && !Character.isHighSurrogate(c)) {
+                        String part = "<p>" + escape(line.toString()) + "</p>\n";
+                        if (html.length() + part.length() > CHUNK && html.length() > 0) {
+                            epub.chapter(html.toString(), heading, toc);
+                            html.setLength(0);
+                            toc = false;
+                        }
+                        html.append(part);
+                        line.setLength(0);
+                        lineSplit = true;
+                    }
+                }
+            }
+            if (line.length() > 0) {
+                String part = "<p>" + escape(line.toString()) + "</p>\n";
+                if (html.length() + part.length() > CHUNK && html.length() > 0) {
+                    epub.chapter(html.toString(), heading, toc);
+                    html.setLength(0);
+                    toc = false;
+                }
+                html.append(part);
+            }
+            if (html.length() > 0) epub.chapter(html.toString(), heading, toc);
+            epub.finish();
+        }
+    }
+
+    static void mobi(File raw, File dest, String title) throws IOException {
+        try (var in = new RandomAccessFile(raw, "r")) {
+            in.seek(60);
+            if (in.readInt() != 0x424f4f4b || in.readInt() != 0x4d4f4249)
+                throw new IOException("無法辨識這個 MOBI 檔案");
+            in.seek(76);
+            int count = in.readUnsignedShort();
+            if (count < 2) throw new IOException("MOBI 沒有文字記錄");
+            long[] offsets = new long[count + 1];
+            for (int i = 0; i < count; i++) {
+                offsets[i] = Integer.toUnsignedLong(in.readInt());
+                in.readInt();
+            }
+            offsets[count] = in.length();
+            for (int i = 0; i < count; i++)
+                if (offsets[i] < 78L + count * 8 || offsets[i] >= offsets[i + 1])
+                    throw new IOException("MOBI 記錄表損毀");
+            in.seek(offsets[0]);
+            int compression = in.readUnsignedShort();
+            in.skipBytes(2);
+            int textSize = in.readInt();
+            int records = in.readUnsignedShort();
+            in.skipBytes(2);
+            if (in.readUnsignedShort() != 0) throw new IOException("這個 MOBI 有數位版權保護");
+            in.skipBytes(2);
+            if (offsets[1] - offsets[0] < 40 || in.readInt() != 0x4d4f4249)
+                throw new IOException("MOBI 標頭不完整");
+            int headerLength = in.readInt();
+            in.skipBytes(4);
+            int codePage = in.readInt();
+            in.skipBytes(4);
+            int version = in.readInt();
+            if (version >= 8 || compression != 1 && compression != 2)
+                throw new IOException("此 MOBI 版本或壓縮格式暫不支援");
+            if (textSize <= 0 || textSize > 64 * 1024 * 1024 || records <= 0 || records >= count)
+                throw new IOException("MOBI 文字記錄大小不符");
+            int extra = 0;
+            if (headerLength >= 228 && offsets[1] - offsets[0] >= 244) {
+                in.seek(offsets[0] + 242);
+                extra = in.readUnsignedShort();
+            }
+            var output = new ByteArrayOutputStream();
+            for (int i = 1; i <= records && output.size() < textSize; i++) {
+                long length = offsets[i + 1] - offsets[i];
+                if (length > 1024 * 1024) throw new IOException("MOBI 記錄過大");
+                var bytes = new byte[(int) length];
+                in.seek(offsets[i]); in.readFully(bytes);
+                int used = trimMobi(bytes, extra);
+                byte[] decoded = compression == 2 ? palm(bytes, used) : Arrays.copyOf(bytes, used);
+                output.write(decoded, 0, Math.min(decoded.length, textSize - output.size()));
+            }
+            if (output.size() != textSize) throw new IOException("MOBI 正文不完整");
+            Charset encoding = codePage == 65001 ? StandardCharsets.UTF_8 : Charset.forName("windows-1252");
+            String body = output.toString(encoding).replaceAll("(?is)<(?:script|style)\\b[^>]*>.*?</(?:script|style)>", "");
+            String plain = android.text.Html.fromHtml(body, android.text.Html.FROM_HTML_MODE_LEGACY).toString();
+            if (plain.isBlank()) throw new IOException("MOBI 沒有可讀正文");
+            File temp = File.createTempFile("mobi-", ".txt", dest.getParentFile());
+            try {
+                Files.writeString(temp.toPath(), plain, StandardCharsets.UTF_8);
+                txt(temp, dest, title, StandardCharsets.UTF_8);
+            } finally { temp.delete(); }
+        }
+    }
+
+    private static int trimMobi(byte[] data, int flags) throws IOException {
+        int end = data.length;
+        for (int bits = flags >>> 1; bits != 0; bits >>>= 1) {
+            if ((bits & 1) == 0) continue;
+            int size = 0;
+            for (int shift = 0, i = end - 1; i >= 0 && shift < 28; i--, shift += 7) {
+                int b = data[i] & 255;
+                size |= (b & 127) << shift;
+                if ((b & 128) != 0) break;
+            }
+            if (size <= 0 || size > end) throw new IOException("MOBI 記錄附註損毀");
+            end -= size;
+        }
+        if ((flags & 1) != 0 && end > 0) end -= (data[end - 1] & 3) + 1;
+        if (end < 0) throw new IOException("MOBI 記錄附註損毀");
+        return end;
+    }
+
+    private static byte[] palm(byte[] input, int end) throws IOException {
+        byte[] decoded = new byte[65_536];
+        int size = 0;
+        for (int i = 0; i < end;) {
+            int c = input[i++] & 255;
+            if (size > decoded.length - 12) throw new IOException("MOBI 記錄解壓異常");
+            if (c == 0 || c >= 9 && c <= 127) decoded[size++] = (byte)c;
+            else if (c <= 8) {
+                if (i + c > end) throw new IOException("MOBI 記錄不完整");
+                System.arraycopy(input, i, decoded, size, c);
+                i += c; size += c;
+            } else if (c >= 192) {
+                decoded[size++] = 32;
+                decoded[size++] = (byte)(c ^ 128);
+            } else {
+                if (i >= end) throw new IOException("MOBI 記錄不完整");
+                int pair = c << 8 | input[i++] & 255;
+                int distance = (pair >>> 3) & 2047;
+                int length = (pair & 7) + 3;
+                if (distance == 0 || distance > size) throw new IOException("MOBI 記錄索引異常");
+                for (int j = 0; j < length; j++) { decoded[size] = decoded[size - distance]; size++; }
+            }
+        }
+        return Arrays.copyOf(decoded, size);
+    }
+
+    static Epub epub(ZipFile zip) throws Exception {
+        String root = null;
+        var container = xml(zip, "META-INF/container.xml");
+        for (int type = container.getEventType(); type != XmlPullParser.END_DOCUMENT; type = container.next())
+            if (type == XmlPullParser.START_TAG && container.getName().equals("rootfile")) {
+                root = container.getAttributeValue(null, "full-path");
+                break;
+            }
+        if (root == null) throw new IOException("EPUB 找不到書籍資訊");
+        var manifest = new HashMap<String, String>();
+        var spine = new ArrayList<String>();
+        var opf = xml(zip, root);
+        String nav = null;
+        boolean fixed = false, rtl = false;
+        for (int type = opf.getEventType(); type != XmlPullParser.END_DOCUMENT; type = opf.next()) {
+            if (type != XmlPullParser.START_TAG) continue;
+            switch (opf.getName()) {
+                case "item" -> {
+                    String href = opf.getAttributeValue(null, "href");
+                    String properties = opf.getAttributeValue(null, "properties");
+                    if (href != null) {
+                        String path = resolve(root, href);
+                        manifest.put(opf.getAttributeValue(null, "id"), path);
+                        if (properties != null && Arrays.asList(properties.split("\\s+")).contains("nav"))
+                            nav = path;
+                    }
+                }
+                case "spine" -> rtl = "rtl".equals(opf.getAttributeValue(null, "page-progression-direction"));
+                case "itemref" -> spine.add(opf.getAttributeValue(null, "idref"));
+                case "meta" -> {
+                    if ("rendition:layout".equals(opf.getAttributeValue(null, "property")))
+                        fixed = "pre-paginated".equals(opf.nextText().strip());
+                }
+            }
+        }
+        var titles = new HashMap<String, String>();
+        if (nav != null) {
+            try {
+                var menu = xml(zip, nav);
+                for (int type = menu.getEventType(); type != XmlPullParser.END_DOCUMENT; type = menu.next()) {
+                    if (type != XmlPullParser.START_TAG || !menu.getName().equals("a")) continue;
+                    String href = menu.getAttributeValue(null, "href");
+                    if (href == null) continue;
+                    int level = menu.getDepth();
+                    var label = new StringBuilder();
+                    while (menu.next() != XmlPullParser.END_DOCUMENT
+                        && !(menu.getEventType() == XmlPullParser.END_TAG && menu.getDepth() == level))
+                        if (menu.getEventType() == XmlPullParser.TEXT) label.append(menu.getText());
+                    if (!label.toString().isBlank()) titles.putIfAbsent(resolve(nav, href), label.toString().strip());
+                }
+            } catch (Exception ignored) { /* A broken optional navigation file does not block reading. */ }
+        }
+        var paths = new ArrayList<Chapter>();
+        for (String id : spine) {
+            String path = manifest.get(id);
+            if (path != null && zip.getEntry(path) != null) {
+                String label = titles.get(path);
+                if (label == null && !path.matches("OEBPS/part-[0-9]+\\.xhtml")) label = "第 " + (paths.size() + 1) + " 節";
+                paths.add(new Chapter(path, label));
+            }
+        }
+        if (paths.isEmpty()) throw new IOException("EPUB 沒有可讀章節");
+        return new Epub(paths, fixed, rtl);
+    }
+
+    private static XmlPullParser xml(ZipFile zip, String path) throws Exception {
+        var e = zip.getEntry(path);
+        if (e == null) throw new IOException("EPUB 缺少 " + path);
+        byte[] data;
+        try (var in = zip.getInputStream(e)) { data = in.readNBytes(4 * 1024 * 1024 + 1); }
+        if (data.length > 4 * 1024 * 1024) throw new IOException("EPUB 索引過大");
+        var parser = Xml.newPullParser();
+        parser.setInput(new ByteArrayInputStream(data), null);
+        return parser;
+    }
+
+    private static String resolve(String base, String href) {
+        try {
+            var uri = new URI(null, null, "/" + base, null).resolve(href.replace(" ", "%20"));
+            String path = uri.normalize().getPath();
+            return !uri.isAbsolute() && uri.getAuthority() == null && path != null && path.startsWith("/")
+                && !path.startsWith("/../") ? path.substring(1) : "";
+        } catch (Exception e) { return ""; }
+    }
+
+    static String escape(String value) { return TextUtils.htmlEncode(value); }
+
+    private static final class EpubOutput implements Closeable {
+        final ZipOutputStream zip;
+        final String title;
+        final ArrayList<String> paths = new ArrayList<>();
+        final ArrayList<String> contents = new ArrayList<>();
+
+        EpubOutput(File file, String title) throws IOException {
+            this.title = title;
+            zip = new ZipOutputStream(new FileOutputStream(file));
+            byte[] type = "application/epub+zip".getBytes(StandardCharsets.US_ASCII);
+            var header = new ZipEntry("mimetype");
+            var crc = new CRC32(); crc.update(type);
+            header.setMethod(ZipEntry.STORED); header.setSize(type.length); header.setCrc(crc.getValue());
+            zip.putNextEntry(header); zip.write(type); zip.closeEntry();
+            entry("META-INF/container.xml", """
+                <?xml version="1.0" encoding="UTF-8"?>
+                <container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/book.opf" media-type="application/oebps-package+xml"/></rootfiles></container>
+                """);
+        }
+
+        void chapter(String text, String name, boolean toc) throws IOException {
+            String path = "part-" + paths.size() + ".xhtml";
+            paths.add(path);
+            if (toc) contents.add("<li><a href=\"" + path + "\">" + escape(name) + "</a></li>");
+            entry("OEBPS/" + path, page(name, text));
+        }
+
+        void finish() throws IOException {
+            if (paths.isEmpty()) throw new IOException("文字檔沒有內容");
+            var items = new StringBuilder();
+            var spine = new StringBuilder();
+            for (int i = 0; i < paths.size(); i++) {
+                items.append("<item id=\"p").append(i).append("\" href=\"").append(paths.get(i))
+                    .append("\" media-type=\"application/xhtml+xml\"/>");
+                spine.append("<itemref idref=\"p").append(i).append("\"/>");
+            }
+            entry("OEBPS/nav.xhtml", page("目錄", "<nav epub:type=\"toc\"><ol>"
+                + String.join("", contents) + "</ol></nav>"));
+            entry("OEBPS/book.opf", """
+                <?xml version="1.0" encoding="UTF-8"?>
+                <package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="id"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:identifier id="id">urn:uuid:%s</dc:identifier><dc:title>%s</dc:title><dc:language>zh</dc:language><meta property="dcterms:modified">%s</meta></metadata><manifest><item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>%s</manifest><spine>%s</spine></package>
+                """.formatted(UUID.randomUUID(), escape(title), java.time.Instant.now().truncatedTo(java.time.temporal.ChronoUnit.SECONDS), items, spine));
+        }
+
+        private String page(String title, String body) {
+            return "<!DOCTYPE html><html xmlns=\"http://www.w3.org/1999/xhtml\" xmlns:epub=\"http://www.idpf.org/2007/ops\"><head><meta charset=\"utf-8\"/><title>"
+                + escape(title) + "</title></head><body>" + body + "</body></html>";
+        }
+
+        private void entry(String path, String data) throws IOException {
+            zip.putNextEntry(new ZipEntry(path)); zip.write(data.getBytes(StandardCharsets.UTF_8)); zip.closeEntry();
+        }
+
+        @Override public void close() throws IOException { zip.close(); }
+    }
+}
