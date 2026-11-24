@@ -898,9 +898,11 @@ public final class ReaderActivity extends Activity {
         for (int i = 0; i < markers.length(); i++) {
             var marker = markers.optJSONObject(i);
             if (marker == null || marker.optInt("chapter") != chapter) continue;
+            try {
+                anchors.put(new JSONArray().put(marker.optInt("paragraph", -1)).put(marker.optDouble("offset", 0))
+                    .put(marker.optString("sample")));
+            } catch (JSONException invalid) { continue; }
             indexes.add(i);
-            anchors.put(new JSONArray().put(marker.optInt("paragraph", -1)).put(marker.optDouble("offset", 0))
-                .put(marker.optString("sample")));
         }
         if (indexes.isEmpty()) { addBookmark(markers); return; }
         js("reader.onPage(" + anchors + ")", value -> {
