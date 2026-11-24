@@ -1042,16 +1042,57 @@ public final class ReaderActivity extends Activity {
             requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, MIC);
             return;
         }
+        if (!voiceOn && !VoiceModel.ready(this)) { offerVoiceModel(); return; }
         voiceOn = !voiceOn; updateVoice();
     }
 
     @Override public void onRequestPermissionsResult(int request, String[] permissions, int[] results) {
         super.onRequestPermissionsResult(request, permissions, results);
         if (request == MIC) {
-            voiceOn = results.length > 0 && results[0] == PackageManager.PERMISSION_GRANTED;
-            if (!voiceOn) message("允許使用麥克風後才能語音翻頁");
-            updateVoice();
+            boolean granted = results.length > 0 && results[0] == PackageManager.PERMISSION_GRANTED;
+            if (!granted) { message("允許使用麥克風後才能語音翻頁"); return; }
+            if (!VoiceModel.ready(this)) { offerVoiceModel(); return; }
+            voiceOn = true; updateVoice();
         }
+    }
+
+    private boolean modelDownloading;
+
+    /** Asks before the first voice use whether to download the offline model. */
+    private void offerVoiceModel() {
+        if (modelDownloading) return;
+        new AlertDialog.Builder(this).setTitle("下載離線語音模型")
+            .setMessage("語音翻頁需要先下載約 42 MB 的中文語音模型，只需下載一次，之後離線也能使用。建議連上 Wi-Fi。")
+            .setNegativeButton("取消", null)
+            .setPositiveButton("下載", (d, w) -> downloadVoiceModel()).show();
+    }
+
+    private void downloadVoiceModel() {
+        modelDownloading = true;
+        var cancelled = new java.util.concurrent.atomic.AtomicBoolean();
+        var wait = new AlertDialog.Builder(this).setMessage("正在下載語音模型… 0%").setCancelable(false)
+            .setNegativeButton("取消", (d, w) -> cancelled.set(true)).show();
+        new Thread(() -> {
+            try {
+                VoiceModel.download(this, BuildConfig.VOSK_SHA256,
+                    percent -> runOnUiThread(() -> { if (wait.isShowing()) wait.setMessage("正在下載語音模型… " + percent + "%"); }),
+                    cancelled::get);
+                runOnUiThread(() -> {
+                    modelDownloading = false;
+                    if (isDestroyed()) return;
+                    wait.dismiss();
+                    message("語音模型已就緒，說「下一頁」或「上一頁」翻頁");
+                    voiceOn = true; updateVoice();
+                });
+            } catch (Exception e) {
+                runOnUiThread(() -> {
+                    modelDownloading = false;
+                    if (isDestroyed()) return;
+                    wait.dismiss();
+                    if (!cancelled.get()) message("語音模型下載失敗，請確認網路後再試。" + (e.getMessage() == null ? "" : e.getMessage()));
+                });
+            }
+        }, "voice-model-download").start();
     }
 
     private void updateVoice() { syncVoice(); }

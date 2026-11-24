@@ -79,6 +79,41 @@ public final class ReaderSmokeTest {
         assertEquals("隨身碟", new Chinese(app).convert("U盘", "tw"));
     }
 
+    private byte[] modelArchive(String... entries) throws IOException {
+        var bytes = new ByteArrayOutputStream();
+        try (var zip = new ZipOutputStream(bytes)) {
+            for (String name : entries) {
+                zip.putNextEntry(new ZipEntry(name));
+                if (!name.endsWith("/")) zip.write(name.getBytes(StandardCharsets.UTF_8));
+                zip.closeEntry();
+            }
+        }
+        return bytes.toByteArray();
+    }
+
+    @Test public void installDownloadedVoiceModelSafely() throws Exception {
+        var app = InstrumentationRegistry.getInstrumentation().getTargetContext();
+        VoiceModel.delete(VoiceModel.folder(app));
+        assertFalse(VoiceModel.ready(app));
+        // A crafted archive that writes outside the model folder is refused and installs nothing.
+        try {
+            VoiceModel.install(app, new ByteArrayInputStream(modelArchive("m/am/final.mdl", "m/../../escaped.txt")));
+            fail("An entry leaving the model folder must be refused");
+        } catch (IOException expected) {}
+        assertFalse(VoiceModel.ready(app));
+        assertFalse(new File(app.getFilesDir(), "escaped.txt").exists());
+        // An archive without the acoustic model is incomplete.
+        try {
+            VoiceModel.install(app, new ByteArrayInputStream(modelArchive("m/README")));
+            fail("An incomplete model must be refused");
+        } catch (IOException expected) {}
+        assertFalse(VoiceModel.ready(app));
+        VoiceModel.install(app, new ByteArrayInputStream(modelArchive("m/", "m/am/final.mdl", "m/conf/model.conf")));
+        assertTrue(VoiceModel.ready(app));
+        assertTrue(new File(VoiceModel.folder(app), "conf/model.conf").isFile());
+        VoiceModel.delete(VoiceModel.folder(app));
+    }
+
     @Test public void readPdfAndComicPages() throws Exception {
         var pdf = temp(".pdf");
         var cbz = temp(".cbz");

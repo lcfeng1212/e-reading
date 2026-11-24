@@ -5,10 +5,14 @@ Android 13 / BOOX Go 7 開發預覽。書架右上角「＋」可選本機書檔
 - TXT 轉成 EPUB 後閱讀。EPUB、PDF、CBZ 可開啟，並保留位置與書籤。
 - 無數位版權保護的 MOBI 以 libmobi 轉成 EPUB，包含常見的 MOBI／KF8 文字與圖檔。固定版面複製本與受保護的檔案不在支援範圍。
 - 流式正文可切換繁簡，字形轉換使用 OpenCC 字典。Google ML Kit 英文、日文翻譯需要先在 Wi-Fi 下載模型。
-- 閱讀頁點中央開工具列。語音翻頁預設關閉，每次開啟 App 都從關閉開始；在閱讀頁按「語音」開啟後說「下一頁」或「上一頁」。離線語音模型為 Vosk 小型中文 0.22。
+- 閱讀頁點中央開工具列。語音翻頁預設關閉，每次開啟 App 都從關閉開始；在閱讀頁按「語音」開啟後說「下一頁」或「上一頁」。離線語音模型為 Vosk 小型中文 0.22，第一次開啟語音時下載（約 42 MB）。
 - Google Drive 入口取決於 Go 7 選檔器。若沒有提供，先在 Drive 下載後從「下載」選檔。
 
-## 編譯與下載
+## 下載安裝
+
+在 BOOX Go 7 用瀏覽器開啟 https://github.com/lcfeng1212/e-reading/releases/latest/download/e-reading.apk ，下載完成後點檔案即可安裝。第一次安裝需要允許瀏覽器「安裝不明應用程式」。main 每次更新都會自動換成最新版。
+
+## 編譯
 
 [GitHub Actions](https://github.com/lcfeng1212/e-reading/actions/workflows/android.yml) 會安裝 Android SDK、取得離線模型與繁簡字典、編譯 APK。到成功的執行紀錄下載 `e-reading-v0.1.0`，解壓後安裝 `e-reading-v0.1.0.apk`。APK 為開發測試版。
 
