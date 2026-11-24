@@ -217,4 +217,33 @@ public class OptimizeStressTest {
             log("Invalid EPUB replacement rolled back");
         } finally { if (book!=null) library.remove(book);file.delete();invalid.delete(); }
     }
+
+    @Test public void encodingRoundTrip() throws Exception {
+        File f=temp(".txt"); Library l=new Library(app); org.json.JSONObject b=null;
+        try {
+            Files.write(f.toPath(),"繁體中文".getBytes("Big5")); b=l.add(Uri.fromFile(f),false,false);
+            b.put("encoding","Big5"); l.save(); String backup=l.backup(); assertTrue(backup.contains("Big5"));
+            l.remove(b); b=l.add(Uri.fromFile(f),false,false); assertTrue(l.restore(backup)>0);
+            assertEquals("Big5",b.optString("encoding","auto"));
+        } finally { if(b!=null)l.remove(b); f.delete(); }
+    }
+    @Test public void invalidBackupRollback() throws Exception {
+        File f=temp(".txt"); Library l=new Library(app); org.json.JSONObject b=null;
+        try {
+            Files.write(f.toPath(),"backup rollback".getBytes()); b=l.add(Uri.fromFile(f),false,false);
+            String title=b.getString("title");
+            var rows=new org.json.JSONArray().put(new org.json.JSONObject().put("id",b.getString("id")).put("title","partial")).put(7);
+            try { l.restore(new org.json.JSONObject().put("version",1).put("books",rows).toString()); fail(); }
+            catch(org.json.JSONException expected) {}
+            assertEquals(title,b.getString("title"));
+        } finally { if(b!=null)l.remove(b); f.delete(); }
+    }
+    @Test public void changedConvertedBook() throws Exception {
+        File f=temp(".txt"); Library l=new Library(app); org.json.JSONObject b=null;
+        try {
+            Files.write(f.toPath(),"原先章節".getBytes("UTF-8")); b=l.add(Uri.fromFile(f),true,true);
+            assertTrue(l.epub(b,null).isFile()); Files.write(f.toPath(),"已變更的章節".getBytes("UTF-8"));
+            try { l.epub(b,null); fail("stale EPUB"); } catch(IOException e){assertTrue(e.getMessage().contains("變更"));}
+        } finally { if(b!=null)l.remove(b); f.delete(); }
+    }
 }

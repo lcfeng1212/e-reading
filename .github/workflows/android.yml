@@ -1,7 +1,7 @@
 name: Android APK
 on:
   push:
-    branches: [main]
+    branches: [qa/retest-86e4cbb]
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -73,4 +73,4 @@ jobs:
           arch: x86_64
           target: google_apis
           disable-animations: true
-          script: gradle :app:connectedDebugAndroidTest
+          script: gradle :app:connectedDebugAndroidTest || { adb logcat -d -s BooxOptimizeStress:I; exit 1; }
