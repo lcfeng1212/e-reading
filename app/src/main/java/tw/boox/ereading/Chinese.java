@@ -49,6 +49,8 @@ final class Chinese {
         String replace(String value) {
             var out = new StringBuilder(value.length());
             for (int i = 0; i < value.length();) {
+                char first = value.charAt(i);
+                if (first < 0x2e80) { out.append(first); i++; continue; }
                 String replacement = null;
                 int len = Math.min(max, value.length() - i);
                 for (; len > 0; len--) {

@@ -44,9 +44,10 @@ final class Voice {
                 }
                 if (run != generation) return;
                 recognizer = new Recognizer(model, 16000,
-                    "[\"下一页\", \"上一页\", \"[unk]\"]");
+                    "[\"下一页\", \"上 一页\", \"下\", \"上\", \"[unk]\"]");
+                recognizer.setWords(true);
                 speech = new SpeechService(recognizer, 16000);
-                speech.startListening(new RecognitionListener() {
+                boolean started = speech.startListening(new RecognitionListener() {
                     @Override public void onPartialResult(String data) {}
                     @Override public void onFinalResult(String data) {}
                     @Override public void onError(Exception error) {
@@ -56,7 +57,12 @@ final class Voice {
                     @Override public void onResult(String data) {
                         if (run != generation) return;
                         try {
-                            String phrase = new JSONObject(data).optString("text").replaceAll("\\s+", "")
+                            var result = new JSONObject(data);
+                            var words = result.optJSONArray("result");
+                            if (words == null || words.length() == 0) return;
+                            for (int i = 0; i < words.length(); i++)
+                                if (words.getJSONObject(i).optDouble("conf", 0) < .60) return;
+                            String phrase = result.optString("text").replaceAll("\\s+", "")
                                 .replace('頁', '页');
                             int delta = phrase.equals("下一页") ? 1 : phrase.equals("上一页") ? -1 : 0;
                             long now = android.os.SystemClock.elapsedRealtime();
@@ -67,6 +73,7 @@ final class Voice {
                         } catch (Exception ignored) {}
                     }
                 });
+                if (!started) throw new IOException("無法啟動收音");
                 if (run == generation) listener.state("聆聽中");
             } catch (Exception e) {
                 end();

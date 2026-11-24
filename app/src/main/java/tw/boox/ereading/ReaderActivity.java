@@ -469,7 +469,7 @@ public final class ReaderActivity extends Activity {
                 int run = epoch;
                 js("window.bookFixed=" + epub.fixed() + ";\n" + readerScript, result -> {
                     if (run != epoch) return;
-                    transform(() -> restoreWeb(page, paragraph, offset, sample));
+                    transform(true, () -> restoreWeb(page, paragraph, offset, sample));
                 });
             }
         });
@@ -522,10 +522,15 @@ public final class ReaderActivity extends Activity {
         });
     }
 
-    private void transform(Runnable done) {
+    private void transform(boolean freshlyLoaded, Runnable done) {
         if (epub.fixed()) { done.run(); return; }
         int run = epoch;
         String mode = book.optString("chinese", "original");
+        if (mode.equals("original")) {
+            if (freshlyLoaded) done.run();
+            else js("reader.replace([])", ignored -> done.run());
+            return;
+        }
         js("reader.originals()", value -> io.execute(() -> {
             try {
                 var input = new JSONArray(value);
@@ -887,7 +892,7 @@ public final class ReaderActivity extends Activity {
                 put(book, "chinese", modes[index]); library.save();
                 for (int a = 0; a < modes.length; a++) buttons[a].setText((a == index ? "✓ " : "") + names[a]);
                 busy = true;
-                transform(() -> restoreWeb(page, paragraph, offset, sample));
+                transform(false, () -> restoreWeb(page, paragraph, offset, sample));
             });
             if (modes[i].equals(book.optString("chinese", "original"))) buttons[i].setText("✓ " + names[i]);
             weighted(language, buttons[i]);

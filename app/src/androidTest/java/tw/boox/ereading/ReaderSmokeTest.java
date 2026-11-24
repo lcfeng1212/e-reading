@@ -53,12 +53,13 @@ public final class ReaderSmokeTest {
         try {
             var ink = new Paint();
             ink.setTextSize(22);
-            try (var document = new PdfDocument(); var out = new FileOutputStream(pdf)) {
+            var document = new PdfDocument();
+            try (var out = new FileOutputStream(pdf)) {
                 var page = document.startPage(new PdfDocument.PageInfo.Builder(360, 400, 1).create());
                 page.getCanvas().drawText("Offline reader", 16, 40, ink);
                 document.finishPage(page);
                 document.writeTo(out);
-            }
+            } finally { document.close(); }
             com.tom_roush.pdfbox.android.PDFBoxResourceLoader.init(
                 InstrumentationRegistry.getInstrumentation().getTargetContext());
             try (var pages = new Pages(pdf, true)) {
