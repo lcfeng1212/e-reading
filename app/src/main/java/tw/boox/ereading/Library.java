@@ -124,9 +124,12 @@ final class Library {
         return now[0] == size && now[1] == modified;
     }
 
-    synchronized JSONObject replace(JSONObject old, Uri uri, boolean continueReading) throws Exception {
-        var previous = new JSONObject(old.toString());
-        var existing = new ArrayList<>(entries);
+    JSONObject replace(JSONObject old, Uri uri, boolean continueReading) throws Exception {
+        // Copying, hashing and checking a large file happen outside the lock, so saving the
+        // reading position is never held up. Only the shelf update below is locked.
+        JSONObject previous;
+        List<JSONObject> existing;
+        synchronized (this) { previous = new JSONObject(old.toString()); existing = new ArrayList<>(entries); }
         var next = add(uri, false, false);
         try {
             String format = next.optString("format");
@@ -141,17 +144,19 @@ final class Library {
             if (!existing.contains(next)) remove(next);
             throw failure;
         }
-        for (String key : List.of("size", "chinese", "night", "hand", "rtl", "language", "font",
-            "spacing", "fit", "rotation")) {
-            if (previous.has(key)) next.put(key, previous.get(key));
+        synchronized (this) {
+            for (String key : List.of("size", "chinese", "night", "hand", "rtl", "language", "font",
+                "spacing", "fit", "rotation")) {
+                if (previous.has(key)) next.put(key, previous.get(key));
+            }
+            for (String key : List.of("chapter", "position", "paragraph", "offset", "sample", "anchorPath")) {
+                if (continueReading && previous.has(key)) next.put(key, previous.get(key));
+                else next.remove(key);
+            }
+            // A new edition can move bookmarks. Keep them only when the file identity still matches.
+            if (!old.optString("id").equals(next.optString("id"))) remove(old);
+            save();
         }
-        for (String key : List.of("chapter", "position", "paragraph", "offset", "sample", "anchorPath")) {
-            if (continueReading && previous.has(key)) next.put(key, previous.get(key));
-            else next.remove(key);
-        }
-        // A new edition can move bookmarks. Keep them only when the file identity still matches.
-        if (!old.optString("id").equals(next.optString("id"))) remove(old);
-        save();
         return next;
     }
 
@@ -225,20 +230,22 @@ final class Library {
         return new JSONObject().put("version", 1).put("books", all).toString(2);
     }
 
+    static final List<String> RESTORED = List.of("title", "chapter", "position", "paragraph", "offset",
+        "sample", "anchorPath", "markers", "size", "chinese", "night", "hand", "rtl",
+        "language", "font", "spacing", "fit", "rotation", "opened", "encoding");
+
     synchronized int restore(String text) throws JSONException {
         var root = new JSONObject(text);
         if (root.getInt("version") != 1) throw new JSONException("備份版本不支援");
         var saved = root.getJSONArray("books");
+        // Read the whole backup first. A damaged entry must not leave the shelf half restored.
+        var copies = new ArrayList<JSONObject>();
+        for (int i = 0; i < saved.length(); i++) copies.add(saved.getJSONObject(i));
         int matches = 0;
-        for (int i = 0; i < saved.length(); i++) {
-            var copy = saved.getJSONObject(i);
+        for (var copy : copies) {
             for (var book : entries) {
                 if (!book.optString("id").equals(copy.optString("id"))) continue;
-                for (String key : List.of("title", "chapter", "position", "paragraph", "offset",
-                    "sample", "anchorPath", "markers", "size", "chinese", "night", "hand", "rtl",
-                    "language", "font", "spacing", "fit", "rotation", "opened")) {
-                    if (copy.has(key)) book.put(key, copy.get(key));
-                }
+                for (String key : RESTORED) if (copy.has(key)) book.put(key, copy.get(key));
                 matches++;
                 break;
             }
