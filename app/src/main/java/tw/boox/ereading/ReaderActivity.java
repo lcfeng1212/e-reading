@@ -41,6 +41,8 @@ public final class ReaderActivity extends Activity {
     private ImageView image;
     private String readerScript;
     private int chapter, page, paragraph = -1, epoch;
+    // The latest turn requested while a page is loading. Only one is kept, so presses do not pile up.
+    private int queuedTurn;
     private double offset;
     private String sample = "";
     private boolean busy, toolbar, active, voiceOn, voiceRunning, operation, pendingRotate;
@@ -191,7 +193,7 @@ public final class ReaderActivity extends Activity {
                     }).show();
             } else if (i == 1) {
                 startActivityForResult(new Intent(Intent.ACTION_CREATE_DOCUMENT).setType("application/json")
-                    .addCategory(Intent.CATEGORY_OPENABLE).putExtra(Intent.EXTRA_TITLE, "BOOX-reading-backup.json"), EXPORT);
+                    .addCategory(Intent.CATEGORY_OPENABLE).putExtra(Intent.EXTRA_TITLE, "e-reading-backup.json"), EXPORT);
             } else {
                 startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("application/json")
                     .addCategory(Intent.CATEGORY_OPENABLE), RESTORE);
@@ -385,7 +387,7 @@ public final class ReaderActivity extends Activity {
                 try (var in = new FileInputStream(library.source(entry))) { bytes = in.readNBytes(680); }
                 var previews = new String[modes.length];
                 for (int i = 0; i < modes.length; i++) {
-                    String s = new String(bytes, java.nio.charset.Charset.forName(modes[i])).strip();
+                    String s = new String(bytes, Books.named(modes[i])).strip();
                     previews[i] = modes[i] + "\n" + s.substring(0, Math.min(s.length(), 100));
                 }
                 runOnUiThread(() -> new AlertDialog.Builder(this).setTitle("請選擇顯示正常的文字")
@@ -568,7 +570,7 @@ public final class ReaderActivity extends Activity {
     private void relayout() { if (web != null && !busy) restoreWeb(page, paragraph, offset, sample); }
 
     private void apply(String json) {
-        busy = false;
+        settle();
         try {
             JSONObject state = new JSONObject(json);
             page = state.getInt("page"); paragraph = state.optInt("paragraph", -1);
@@ -609,12 +611,12 @@ public final class ReaderActivity extends Activity {
                 Bitmap result = renderer.render(index, crop);
                 runOnUiThread(() -> {
                     if (run != epoch || image == null) { result.recycle(); return; }
-                    image.setImageBitmap(result); resetImage(); busy = false;
+                    image.setImageBitmap(result); resetImage(); settle();
                     put(book, "progress", (page + 1) + " / " + pages.count());
                     snapshot(); refreshStatus();
                 });
             } catch (Exception e) {
-                runOnUiThread(() -> { if (run == epoch) { busy = false; error(e); } });
+                runOnUiThread(() -> { if (run == epoch) { busy = false; queuedTurn = 0; error(e); } });
             }
         });
     }
@@ -678,8 +680,17 @@ public final class ReaderActivity extends Activity {
         return true;
     }
 
+    private void settle() {
+        busy = false;
+        if (queuedTurn == 0 || book == null) return;
+        int delta = queuedTurn;
+        queuedTurn = 0;
+        layout.post(() -> turn(delta));
+    }
+
     private void turn(int delta) {
-        if (busy || book == null) return;
+        if (book == null) return;
+        if (busy) { queuedTurn = delta; return; }
         if (pages != null) {
             int next = page + delta;
             if (next >= 0 && next < pages.count()) { page = next; renderImage(); }
@@ -690,7 +701,7 @@ public final class ReaderActivity extends Activity {
             if ("null".equals(value)) {
                 int next = chapter + delta;
                 if (next >= 0 && next < epub.chapters().size()) loadChapter(next, delta > 0 ? 0 : -1, -1, 0, "");
-                else busy = false;
+                else settle();
             } else apply(value);
         });
     }
@@ -1076,7 +1087,7 @@ public final class ReaderActivity extends Activity {
             close(z); close(p);
             if (closing != null) library.clearCachedSource(closing);
         });
-        zip = null; pages = null; epub = null; busy = false; pendingRotate = false; linkFragment = null; pendingSearch = null;
+        zip = null; pages = null; epub = null; busy = false; queuedTurn = 0; pendingRotate = false; linkFragment = null; pendingSearch = null;
     }
 
     private static void close(Closeable item) { if (item != null) try { item.close(); } catch (IOException ignored) {} }

@@ -36,6 +36,7 @@ final class Chinese {
                     String key = line.substring(0, tab);
                     String value = line.substring(tab + 1).split(" ", 2)[0];
                     dict.values.putIfAbsent(key, value);
+                    dict.starts.add(key.charAt(0));
                     dict.max = Math.max(dict.max, key.length());
                 }
             }
@@ -45,12 +46,14 @@ final class Chinese {
 
     private static final class Dictionary {
         final Map<String, String> values = new HashMap<>();
+        // First characters of all keys. Phrases such as 「U盘」 start with a Latin letter.
+        final Set<Character> starts = new HashSet<>();
         int max;
         String replace(String value) {
             var out = new StringBuilder(value.length());
             for (int i = 0; i < value.length();) {
                 char first = value.charAt(i);
-                if (first < 0x2e80) { out.append(first); i++; continue; }
+                if (!starts.contains(first)) { out.append(first); i++; continue; }
                 String replacement = null;
                 int len = Math.min(max, value.length() - i);
                 for (; len > 0; len--) {

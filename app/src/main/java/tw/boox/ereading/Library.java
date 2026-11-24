@@ -140,7 +140,7 @@ final class Library {
         try {
             if (type.equals("mobi")) Mobi.convert(original, temp);
             else Books.txt(original, temp, book.optString("title"),
-                selected.equals("auto") ? Books.charset(original) : java.nio.charset.Charset.forName(selected));
+                selected.equals("auto") ? Books.charset(original) : Books.named(selected));
             commit(temp, result);
             return result;
         } finally { temp.delete(); }
