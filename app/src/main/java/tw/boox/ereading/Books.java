@@ -1,6 +1,7 @@
 package tw.boox.ereading;
 
-import com.ibm.icu.text.CharsetDetector;
+// Android's built-in ICU (API 24+) has the same detector as ICU4J, without a 12 MB library.
+import android.icu.text.CharsetDetector;
 import android.text.TextUtils;
 import android.util.Xml;
 import org.xmlpull.v1.XmlPullParser;

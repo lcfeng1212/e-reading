@@ -54,7 +54,7 @@ jobs:
         run: |
           version=$(jq -er '.elements[0].versionName' app/build/outputs/apk/debug/output-metadata.json)
           name="e-reading-v$version"
-          cp app/build/outputs/apk/debug/app-debug.apk "$name.apk"
+          cp app/build/outputs/apk/debug/app-arm64-v8a-debug.apk "$name.apk"
           echo "name=$name" >> "$GITHUB_OUTPUT"
       - name: Report APK size by part
         run: |
@@ -69,6 +69,9 @@ jobs:
               parts[key] += item.compress_size
           print(f"### APK {os.path.getsize(path) / 1e6:.1f} MB\n\n| 大小 (MB) | 部分 |\n|---:|---|")
           for key, size in parts.most_common(15): print(f"| {size / 1e6:.2f} | `{key}` |")
+          files = sorted(zipfile.ZipFile(path).infolist(), key=lambda i: -i.compress_size)[:12]
+          print("\n| 大小 (MB) | 最大的檔案 |\n|---:|---|")
+          for item in files: print(f"| {item.compress_size / 1e6:.2f} | `{item.filename}` |")
           PY
       - uses: actions/upload-artifact@v4
         with:
